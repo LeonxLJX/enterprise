@@ -1130,16 +1130,13 @@ async def _complete_idp_login(
     web_url = get_web_url(request)
     final_redirect_url = redirect_url or '/'
 
-    # Check onboarding redirect (self-hosted: only the first owner/super-admin).
-    should_onboard = await _should_redirect_to_onboarding_idp_user(user_id, user)
-    if should_onboard:
-        from server.routes.auth import _build_onboarding_redirect
+    from server.routes.auth import _get_post_auth_redirect
 
-        final_redirect_url = _build_onboarding_redirect(final_redirect_url, web_url)
-    else:
-        from server.routes.auth import _build_cross_app_redirect_url
-
-        final_redirect_url = _build_cross_app_redirect_url(final_redirect_url, web_url)
+    # Same destination rules as the Keycloak callbacks: the first Super
+    # Admin's install wizard, then onboarding, then the requested page.
+    final_redirect_url = await _get_post_auth_redirect(
+        user_id, final_redirect_url, web_url, user
+    )
 
     response = RedirectResponse(final_redirect_url, status_code=302)
 
@@ -1391,14 +1388,3 @@ async def _track_idp_login(user_id: str, email: str) -> None:
         orgs=[],
     )
     analytics.track_user_logged_in(ctx=ctx, idp='idp')
-
-
-async def _should_redirect_to_onboarding_idp_user(user_id: str, user) -> bool:
-    """Check onboarding redirect for dev IDP users.
-
-    Delegates to the shared ``_should_redirect_to_onboarding`` logic from
-    the auth routes so behavior is consistent with the Keycloak/OAuth path.
-    """
-    from server.routes.auth import _should_redirect_to_onboarding
-
-    return await _should_redirect_to_onboarding(user_id, user)
