@@ -1053,6 +1053,7 @@ def _idp_invite_router() -> APIRouter:
         )
         web_url = get_web_url(request)
         url = f'{web_url}/oauth/{IDP_INVITE_PATH}?{urlencode({"token": token})}'
+        await _record_signup_link_minted(email_str)
 
         logger.info(
             'idp:signup_link_created',
@@ -1365,6 +1366,34 @@ async def _accept_tos_for_idp_user(user_id: str) -> None:
         user.accepted_tos = accepted_tos
         user.user_consents_to_analytics = True
         await session.commit()
+
+
+async def _record_signup_link_minted(email: str) -> None:
+    """Note on ``instance_settings`` that an admin invited someone by link.
+
+    The setup guide's "Invite users" step reads it (``_guide_steps``). A link
+    for an address that already has an account resets a password rather than
+    inviting anyone, so it is not recorded. Best effort: this bookkeeping never
+    fails the mint, and without a row (``ENABLE_SUPER_ADMIN`` off, or an
+    instance older than the wizard) there is nothing to update.
+    """
+    from sqlalchemy import update
+
+    from storage.database import a_session_maker
+    from storage.instance_settings import InstanceSettings
+
+    try:
+        if await UserStore.get_user_by_email(email) is not None:
+            return
+        async with a_session_maker() as session:
+            await session.execute(
+                update(InstanceSettings)
+                .where(InstanceSettings.id == 1)
+                .values(signup_link_minted_at=datetime.now(timezone.utc))
+            )
+            await session.commit()
+    except Exception:
+        logger.exception('idp:signup_link_guide_stamp_failed', extra={'email': email})
 
 
 async def _track_idp_login(user_id: str, email: str) -> None:

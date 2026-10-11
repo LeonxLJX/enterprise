@@ -887,7 +887,10 @@ async def _user_has_automation_git_account(
 
 
 async def _guide_steps(
-    org_id: UUID, setup_user_id: UUID, request: Request
+    org_id: UUID,
+    setup_user_id: UUID,
+    request: Request,
+    signup_link_minted_at: datetime | None,
 ) -> SetupGuideSteps:
     """Derive the guide's progress from what the organization really has."""
     # Pending invitations only expire when someone touches them, so check the
@@ -927,7 +930,11 @@ async def _guide_steps(
         # A GitHub, GitLab or Bitbucket account already gives the setup user
         # that provider's built-in issue-to-PR workflow.
         automation=has_git_account or await _org_has_automation(org_id, request),
-        invite=(member_count or 0) > 1 or (pending_invitations or 0) > 0,
+        # A sign-up link minted for a new address is an invitation too; it
+        # has no row of its own, so ``create_signup_link`` stamps the instance.
+        invite=(member_count or 0) > 1
+        or (pending_invitations or 0) > 0
+        or signup_link_minted_at is not None,
     )
 
 
@@ -938,7 +945,12 @@ async def _setup_state_response(
         return SetupStateResponse()
     guide_steps = None
     if settings.guide_org_id and not settings.guide_dismissed:
-        guide_steps = await _guide_steps(settings.guide_org_id, UUID(user_id), request)
+        guide_steps = await _guide_steps(
+            settings.guide_org_id,
+            UUID(user_id),
+            request,
+            settings.signup_link_minted_at,
+        )
     return SetupStateResponse(
         wizard_pending=not settings.wizard_completed,
         guide_org_id=str(settings.guide_org_id) if settings.guide_org_id else None,

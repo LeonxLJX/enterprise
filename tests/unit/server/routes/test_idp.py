@@ -33,6 +33,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
 from openhands.app_server.services.jwt_service import JwtService
@@ -47,6 +48,7 @@ from server.routes.idp import (
     derive_idp_user_id,
     is_idp_available,
 )
+from storage.instance_settings import InstanceSettings
 from storage.oauth_provider import INTEGRATED_IDP_CATEGORY
 
 # Fixed id used in route-dispatch tests (``/oauth/{id}/login`` etc.) that
@@ -2360,6 +2362,51 @@ class TestCreateSignupLink:
         with _patch_jwt_service(jwt_svc):
             link = idp._verify_signup_link_token(token)
         assert link.org_id == org_id
+
+    @pytest.mark.asyncio
+    async def test_records_an_invitation_for_the_setup_guide(
+        self, app, jwt_svc, async_session_maker
+    ):
+        """Minting a link for a new address stamps ``instance_settings``, which
+        the setup guide's "Invite users" step reads. A link for an address
+        that already has an account is a password reset and leaves it alone.
+        """
+        async with async_session_maker() as session:
+            session.add(InstanceSettings(id=1))
+            await session.commit()
+
+        async def mint(existing_user):
+            with (
+                _available(),
+                _authenticated_as(app, 'admin-1'),
+                _superadmin(),
+                _patch_jwt_service(jwt_svc),
+                patch('storage.database.a_session_maker', async_session_maker),
+                patch(
+                    'server.routes.idp.UserStore.get_user_by_email',
+                    new_callable=AsyncMock,
+                    return_value=existing_user,
+                ),
+            ):
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url='http://testserver'
+                ) as client:
+                    return await client.post(
+                        '/api/idp/signup-links', json={'email': 'invitee@example.com'}
+                    )
+
+        async def minted_at():
+            async with async_session_maker() as session:
+                settings = await session.get(InstanceSettings, 1)
+                return settings.signup_link_minted_at
+
+        # Act + Assert: an existing account means a password reset.
+        assert (await mint(_mock_user())).status_code == 201
+        assert await minted_at() is None
+
+        # Act + Assert: a new address means an invitation.
+        assert (await mint(None)).status_code == 201
+        assert await minted_at() is not None
 
     def test_404_when_org_id_not_found(self, app, client, jwt_svc):
         with (
