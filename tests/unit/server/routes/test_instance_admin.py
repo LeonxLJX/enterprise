@@ -1598,6 +1598,14 @@ async def test_the_first_super_admins_mcp_server_completes_the_mcp_step(
     assert resp.json()['guide_steps'] == {**NO_GUIDE_STEPS_DONE, 'mcp_server': True}
 
 
+async def _mint_signup_link(async_session_maker) -> None:
+    """What ``create_signup_link`` records for an address with no account."""
+    async with async_session_maker() as session:
+        settings = await session.get(InstanceSettings, 1)
+        settings.signup_link_minted_at = datetime.now(UTC)
+        await session.commit()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ('add_teammate', 'invite_done'),
@@ -1606,6 +1614,11 @@ async def test_the_first_super_admins_mcp_server_completes_the_mcp_step(
             lambda sessions, org_id: _add_second_member(sessions, org_id),
             True,
             id='second-member',
+        ),
+        pytest.param(
+            lambda sessions, org_id: _mint_signup_link(sessions),
+            True,
+            id='signup-link-minted',
         ),
         pytest.param(
             lambda sessions, org_id: _add_invitation(
@@ -1623,7 +1636,7 @@ async def test_the_first_super_admins_mcp_server_completes_the_mcp_step(
         ),
     ],
 )
-async def test_the_invite_step_needs_a_second_member_or_a_live_invitation(
+async def test_the_invite_step_needs_a_teammate_a_live_invitation_or_a_signup_link(
     add_teammate, invite_done, mock_app, instance_settings_db, async_session_maker
 ):
     # Arrange
