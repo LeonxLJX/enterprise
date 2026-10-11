@@ -33,6 +33,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
 from openhands.app_server.services.jwt_service import JwtService
@@ -47,6 +48,7 @@ from server.routes.idp import (
     derive_idp_user_id,
     is_idp_available,
 )
+from storage.instance_settings import InstanceSettings
 from storage.oauth_provider import INTEGRATED_IDP_CATEGORY
 
 # Fixed id used in route-dispatch tests (``/oauth/{id}/login`` etc.) that
@@ -864,6 +866,74 @@ class TestIdpSignup:
         query = parse_qs(urlparse(location).query)
         assert query['error'] == ['superadmin_exists']
 
+    @pytest.mark.asyncio
+    async def test_first_super_admin_is_sent_to_the_install_wizard(
+        self, app, async_session_maker
+    ):
+        """On a clean install ``create_user`` records the first account as the
+        instance's setup user. Sign-up must then land on ``/install`` (the
+        first-install wizard), not on the default page (OHE-3560)."""
+        # Arrange: a brand-new account that ``create_user`` made the setup user.
+        user_id = derive_idp_user_id('dev@example.com')
+        new_user = _mock_user(user_id=user_id, email='dev@example.com')
+        async with async_session_maker() as session:
+            session.add(
+                InstanceSettings(
+                    id=1, setup_user_id=uuid.UUID(user_id), wizard_completed=False
+                )
+            )
+            await session.commit()
+
+        with (
+            _available(has_password_super_admin=False),
+            patch(
+                'server.routes.idp.UserStore.get_user_by_id',
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                'server.routes.idp.UserStore.get_user_by_email',
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                'server.routes.idp.UserStore.create_user',
+                new_callable=AsyncMock,
+                return_value=new_user,
+            ),
+            patch('server.routes.idp._set_password_hash', new_callable=AsyncMock),
+            patch('server.routes.idp._accept_tos_for_idp_user', new_callable=AsyncMock),
+            patch('server.routes.idp.UserStore.record_login', new_callable=AsyncMock),
+            patch(
+                'server.routes.idp.DefaultOrgBootstrapService.apply_for_user',
+                new_callable=AsyncMock,
+                return_value=new_user,
+            ),
+            patch('server.routes.idp._track_idp_login', new_callable=AsyncMock),
+            patch('server.routes.idp._set_idp_cookie'),
+            patch('server.routes.idp.get_web_url', return_value='http://testserver'),
+            # The real post-auth destination check reads ``instance_settings``.
+            patch('server.routes.auth.a_session_maker', async_session_maker),
+            patch('server.routes.auth.ENABLE_SUPER_ADMIN', True),
+        ):
+            # Act
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url='http://testserver'
+            ) as client:
+                response = await client.post(
+                    f'/oauth/{IDP_SIGNUP_PATH}',
+                    data={
+                        'email': 'dev@example.com',
+                        'password': 'password123',
+                        'confirm_password': 'password123',
+                    },
+                    follow_redirects=False,
+                )
+
+        # Assert
+        assert response.status_code == 302
+        assert response.headers['location'] == 'http://testserver/install'
+
 
 # ── POST /oauth/idp/login ───────────────────────────────────────────────
 
@@ -1033,9 +1103,9 @@ class TestCompleteIdpLogin:
                 new_callable=AsyncMock,
             ),
             patch(
-                'server.routes.idp._should_redirect_to_onboarding_idp_user',
+                'server.routes.auth._get_post_auth_redirect',
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value='http://testserver/',
             ),
             patch('server.routes.idp._set_idp_cookie'),
             patch(
@@ -1079,9 +1149,9 @@ class TestCompleteIdpLogin:
                 new_callable=AsyncMock,
             ),
             patch(
-                'server.routes.idp._should_redirect_to_onboarding_idp_user',
+                'server.routes.auth._get_post_auth_redirect',
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value='http://testserver/',
             ),
             patch('server.routes.idp._set_idp_cookie'),
             patch(
