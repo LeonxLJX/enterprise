@@ -27,10 +27,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.services.jwt_service import JwtService
 from openhands.app_server.user_auth import get_user_id
 from openhands.app_server.utils.encryption_key import EncryptionKey
 from server.routes import oauth_v2
+from storage.auth_provider_details import OAuthProviderDetails
 
 
 def _make_jwt_service() -> JwtService:
@@ -73,16 +75,19 @@ def _fake_provider(
 ):
     provider = MagicMock()
     provider.id = provider_id
-    provider.provider_category = category
-    provider.display_name = category.title()
+    provider.kind = OAuthProviderDetails.__name__
+    provider.title = category.title()
     provider.is_idp = is_idp
-    provider.client_id = 'cid'
-    provider.client_secret = {'v': client_secret} if client_secret else None
-    provider.authorization_url = 'https://example.com/auth'
-    provider.token_url = 'https://example.com/token'
-    provider.userinfo_url = userinfo_url
-    provider.scopes = ['repo']
-    provider.permitted_drift_seconds = 60
+    provider.details = OAuthProviderDetails(
+        provider_type=ProviderType(category),
+        client_id='cid',
+        client_secret=SecretStr(client_secret) if client_secret else None,
+        authorization_url='https://example.com/auth',
+        token_url='https://example.com/token',
+        userinfo_url=userinfo_url,
+        scopes=['repo'],
+        permitted_drift_seconds=60,
+    )
     return provider
 
 
@@ -99,7 +104,15 @@ def test_state_roundtrip(jwt_svc):
 
 
 def test_decrypt_bad_state_raises(jwt_svc, client):
-    with patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc):
+    provider = _fake_provider()
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
         # Garbage base64/state → 400.
         response = client.get(
             '/oauth/1/callback',
@@ -116,7 +129,7 @@ def test_login_redirect_encodes_state(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -138,7 +151,7 @@ def test_login_unknown_provider_404(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=None),
         ),
@@ -149,11 +162,11 @@ def test_login_unknown_provider_404(client, jwt_svc):
 
 def test_login_missing_auth_url_400(client, jwt_svc):
     provider = _fake_provider()
-    provider.authorization_url = None
+    provider.details.authorization_url = None
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -170,7 +183,7 @@ def test_idp_login_redirects_to_first_idp(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_first_idp',
             new=AsyncMock(return_value=provider),
         ),
@@ -189,7 +202,7 @@ def test_idp_login_no_idp_configured_404(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_first_idp',
             new=AsyncMock(return_value=None),
         ),
@@ -203,7 +216,7 @@ def test_idp_login_forwards_mode_link(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_first_idp',
             new=AsyncMock(return_value=provider),
         ),
@@ -221,48 +234,6 @@ def test_idp_login_forwards_mode_link(client, jwt_svc):
     assert 'redirect_url=%2Fsettings' in location
 
 
-def test_provider_type_login_redirects_to_first_match(client, jwt_svc):
-    provider = _fake_provider(provider_id=11, category='github', is_idp=False)
-    with (
-        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
-        patch.object(
-            oauth_v2.OAuthProviderStore,
-            'get_first_by_category',
-            new=AsyncMock(return_value=provider),
-        ),
-    ):
-        response = client.get('/oauth/github-login', follow_redirects=False)
-    assert response.status_code == 302
-    location = response.headers['location']
-    assert location.endswith('/oauth/11/login')
-
-
-def test_provider_type_login_no_match_404(client, jwt_svc):
-    with (
-        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
-        patch.object(
-            oauth_v2.OAuthProviderStore,
-            'get_first_by_category',
-            new=AsyncMock(return_value=None),
-        ),
-    ):
-        response = client.get('/oauth/gitlab-login', follow_redirects=False)
-    assert response.status_code == 404
-
-
-def test_provider_type_login_unknown_type_404(client, jwt_svc):
-    with (
-        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
-        patch.object(
-            oauth_v2.OAuthProviderStore,
-            'get_first_by_category',
-            new=AsyncMock(return_value=None),
-        ),
-    ):
-        response = client.get('/oauth/nonexistent-login', follow_redirects=False)
-    assert response.status_code == 404
-
-
 # ── providers list ───────────────────────────────────────────────────────
 
 
@@ -271,7 +242,7 @@ def test_list_providers(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'list_all',
             new=AsyncMock(return_value=[provider]),
         ),
@@ -280,7 +251,9 @@ def test_list_providers(client, jwt_svc):
     assert response.status_code == 200
     body = response.json()
     assert body['providers'][0]['id'] == 1
-    assert body['providers'][0]['provider_category'] == 'github'
+    assert body['providers'][0]['kind'] == OAuthProviderDetails.__name__
+    assert body['providers'][0]['title'] == 'Github'
+    assert body['providers'][0]['is_idp'] is False
 
 
 # ── callback login flow ──────────────────���──────────────────────────────
@@ -328,7 +301,7 @@ def test_callback_login_persists_tokens_and_sets_cookie(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -352,6 +325,11 @@ def test_callback_login_persists_tokens_and_sets_cookie(client, jwt_svc):
             oauth_v2.UserStore,
             'get_user_by_id',
             new=AsyncMock(return_value=fake_user),
+        ),
+        patch.object(
+            oauth_v2.UserStore,
+            'is_user_disabled',
+            new=AsyncMock(return_value=False),
         ),
         patch.object(
             oauth_v2.OAuthTokenStore,
@@ -399,7 +377,7 @@ def test_callback_login_redirects_to_tos_when_not_accepted(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -425,6 +403,11 @@ def test_callback_login_redirects_to_tos_when_not_accepted(client, jwt_svc):
             new=AsyncMock(return_value=fake_user),
         ),
         patch.object(
+            oauth_v2.UserStore,
+            'is_user_disabled',
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(
             oauth_v2.OAuthTokenStore,
             'store_tokens',
             new=AsyncMock(),
@@ -447,6 +430,71 @@ def test_callback_login_redirects_to_tos_when_not_accepted(client, jwt_svc):
     assert 'openhands_auth' in response.cookies
 
 
+def test_callback_login_refuses_a_disabled_user(client, jwt_svc):
+    """A disabled user is sent to the login page: no tokens stored, no cookie."""
+    # Arrange
+    provider = _fake_provider()
+    token_response = {
+        'access_token': 'at-123',
+        'refresh_token': 'rt-123',
+        'expires_in': 3600,
+    }
+    userinfo = {'sub': 'ext-sub-1', 'email': 'a@b.com'}
+    fake_user = MagicMock()
+    fake_user.id = uuid4()
+
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+        _patch_httpx(token_response, userinfo),
+        patch.object(
+            oauth_v2.OAuthProviderUserStore,
+            'get',
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(
+            oauth_v2.OAuthProviderUserStore,
+            'link',
+            new=AsyncMock(),
+        ),
+        patch.object(
+            oauth_v2.UserStore,
+            'create_user',
+            new=AsyncMock(return_value=fake_user),
+        ),
+        patch.object(
+            oauth_v2.UserStore,
+            'is_user_disabled',
+            new=AsyncMock(return_value=True),
+        ),
+        patch.object(
+            oauth_v2.OAuthTokenStore,
+            'store_tokens',
+            new=AsyncMock(),
+        ) as store_tokens,
+    ):
+        state = oauth_v2._encrypt_state(
+            {'redirect_url': '/done', 'mode': 'login', 'nonce': 'n'}
+        )
+
+        # Act
+        response = client.get(
+            '/oauth/1/callback',
+            params={'code': 'c', 'state': state},
+            follow_redirects=False,
+        )
+
+    # Assert
+    assert response.status_code == 302
+    assert response.headers['location'].endswith('/login?account_disabled=true')
+    assert 'openhands_auth' not in response.cookies
+    store_tokens.assert_not_awaited()
+
+
 def test_callback_link_flow_no_cookie(client, jwt_svc):
     provider = _fake_provider()
     user_id = uuid4()
@@ -456,7 +504,7 @@ def test_callback_link_flow_no_cookie(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -493,7 +541,15 @@ def test_callback_link_flow_no_cookie(client, jwt_svc):
 
 
 def test_callback_missing_code_400(client, jwt_svc):
-    with patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc):
+    provider = _fake_provider()
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
         response = client.get(
             '/oauth/1/callback', params={'state': 'x'}, follow_redirects=False
         )
@@ -501,7 +557,15 @@ def test_callback_missing_code_400(client, jwt_svc):
 
 
 def test_callback_error_param_400(client, jwt_svc):
-    with patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc):
+    provider = _fake_provider()
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
         response = client.get(
             '/oauth/1/callback',
             params={'error': 'access_denied'},
@@ -515,7 +579,7 @@ def test_callback_link_missing_user_id_in_state_400(client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -549,7 +613,7 @@ def test_link_idp_provider_400(app, client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -565,7 +629,7 @@ def test_link_returns_start_url(app, client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -594,7 +658,7 @@ def test_unlink_idp_400(app, client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
@@ -612,7 +676,7 @@ def test_unlink_git_provider(app, client, jwt_svc):
     with (
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch.object(
-            oauth_v2.OAuthProviderStore,
+            oauth_v2.AuthProviderStore,
             'get_by_id',
             new=AsyncMock(return_value=provider),
         ),
