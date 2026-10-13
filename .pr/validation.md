@@ -42,16 +42,16 @@ values in the JSON report.
 
 ## Automated and migration checks
 
-The committed implementation passed all 7,576 backend tests with:
+The final implementation passed all 7,577 backend tests with:
 
 ```sh
 TMPDIR=/tmp uv run pytest -n 4 tests/unit --tb=short -q
 ```
 
 `TMPDIR=/tmp` matches Linux CI and avoids an unchanged test's macOS-specific
-assumption about the temporary directory. A subsequent regression adds coverage
-that an internal resolver TypeError is a 503, rather than a user configuration
-422; the final run is recorded in the PR description.
+assumption about the temporary directory. This includes a regression verifying that an internal resolver TypeError is a
+503, rather than a user configuration 422. The subsequent rebase brings in only
+the Enterprise 1.71.0 release metadata; application behavior is unchanged.
 
 The PostgreSQL suite executes a real Alembic 186→187 upgrade with encrypted
 profile envelopes. Only known legacy empty tool lists change; current empty
