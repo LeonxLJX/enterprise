@@ -13,8 +13,10 @@ from typing import AsyncIterator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.utils.logger import openhands_logger as logger
 from storage.auth_provider import AuthProvider
+from storage.auth_provider_details import OAuthProviderDetails
 from storage.database import a_session_maker
 
 
@@ -99,6 +101,19 @@ class AuthProviderStore:
                 select(AuthProvider).where(AuthProvider.is_idp.is_(False))
             )
             return list(result.scalars().all())
+
+    async def get_git_provider(
+        self, provider_type: ProviderType
+    ) -> AuthProvider | None:
+        """Return the git provider row for ``provider_type`` (e.g. GitLab)."""
+        for provider in await self.get_git_providers():
+            details = provider.details
+            if (
+                isinstance(details, OAuthProviderDetails)
+                and details.provider_type == provider_type
+            ):
+                return provider
+        return None
 
     async def list_all(self) -> list[AuthProvider]:
         async with a_session_maker() as session:

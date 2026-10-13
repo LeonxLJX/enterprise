@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -32,7 +33,7 @@ from openhands.app_server.services.jwt_service import JwtService
 from openhands.app_server.user_auth import get_user_id
 from openhands.app_server.utils.encryption_key import EncryptionKey
 from server.routes import oauth_v2
-from storage.auth_provider_details import OAuthProviderDetails
+from storage.auth_provider_details import OAuthProviderDetails, PasswordProviderDetails
 
 
 def _make_jwt_service() -> JwtService:
@@ -574,6 +575,66 @@ def test_callback_error_param_400(client, jwt_svc):
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize(
+    ('category', 'expect_sync'), [('gitlab', True), ('github', False)]
+)
+def test_callback_link_schedules_gitlab_repo_sync(
+    client, jwt_svc, category, expect_sync
+):
+    provider = _fake_provider(category=category)
+    user_id = uuid4()
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+        _patch_httpx({'access_token': 'at', 'refresh_token': 'rt'}, {'id': 42}),
+        patch.object(oauth_v2.OAuthProviderUserStore, 'link', new=AsyncMock()),
+        patch.object(oauth_v2.OAuthTokenStore, 'store_tokens', new=AsyncMock()),
+        patch.object(oauth_v2, 'schedule_gitlab_repo_sync') as schedule_sync,
+    ):
+        state = oauth_v2._encrypt_state(
+            {
+                'redirect_url': '/settings/integrations',
+                'mode': 'link',
+                'user_id': str(user_id),
+                'nonce': 'n',
+            }
+        )
+        response = client.get(
+            '/oauth/1/callback',
+            params={'code': 'c', 'state': state},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    if expect_sync:
+        schedule_sync.assert_called_once_with(str(user_id))
+    else:
+        schedule_sync.assert_not_called()
+
+
+def test_list_providers_includes_provider_type(client):
+    git = _fake_provider(provider_id=1, category='gitlab')
+    password = MagicMock(id=2, kind=PasswordProviderDetails.__name__, title='Password')
+    password.is_idp = True
+    password.details = PasswordProviderDetails()
+    with patch.object(
+        oauth_v2.AuthProviderStore,
+        'list_all',
+        new=AsyncMock(return_value=[git, password]),
+    ):
+        response = client.get('/oauth/providers')
+
+    assert response.status_code == 200
+    by_id = {p['id']: p for p in response.json()['providers']}
+    assert by_id[1]['provider_type'] == 'gitlab'
+    assert by_id[1]['is_idp'] is False
+    assert by_id[2]['provider_type'] is None
+
+
 def test_callback_link_missing_user_id_in_state_400(client, jwt_svc):
     provider = _fake_provider()
     with (
@@ -636,10 +697,20 @@ def test_link_returns_start_url(app, client, jwt_svc):
     ):
         _override_user_context(app, user_id)
         response = client.post('/oauth/1/link')
-    assert response.status_code == 200
-    body = response.json()
-    assert 'start_url' in body
-    assert 'mode=link' in body['start_url']
+        assert response.status_code == 200
+        start_url = urlsplit(response.json()['start_url'])
+        query = parse_qs(start_url.query)
+        state = oauth_v2._decrypt_state(query['state'][0])
+
+    # The browser goes straight to the provider with a state the callback
+    # accepts in link mode: it must carry the signed-in user's id.
+    assert f'{start_url.scheme}://{start_url.netloc}{start_url.path}' == (
+        'https://example.com/auth'
+    )
+    assert query['redirect_uri'] == ['https://testserver/oauth/1/callback']
+    assert state['mode'] == 'link'
+    assert state['user_id'] == str(user_id)
+    assert state['redirect_url'] == 'https://testserver/settings/integrations'
 
 
 # ── unlink ───────────────────────────────────────────────────────────────

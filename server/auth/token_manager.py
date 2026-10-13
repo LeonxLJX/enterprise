@@ -57,8 +57,6 @@ from server.auth.oauth_v2_refresh import (
     make_refresh_callback,
 )
 from server.logger import logger
-from storage.auth_provider import AuthProvider
-from storage.auth_provider_details import OAuthProviderDetails
 from storage.auth_provider_store import AuthProviderStore
 from storage.auth_token_store import AuthTokenStore
 from storage.database import a_session_maker
@@ -646,7 +644,7 @@ class TokenManager:
         needs no Keycloak, so it works on installs using the integrated IDP.
         Otherwise falls back to the legacy Keycloak offline session.
         """
-        provider = await self._get_oauth_v2_git_provider(idp)
+        provider = await AuthProviderStore().get_git_provider(idp)
         if provider is not None:
             token = await OAuthTokenStore(
                 user_id=UUID(user_id), oauth_provider_id=provider.id
@@ -665,22 +663,10 @@ class TokenManager:
             offline_token=offline_token, idp=idp
         )
 
-    async def _get_oauth_v2_git_provider(
-        self, idp: ProviderType
-    ) -> AuthProvider | None:
-        for provider in await AuthProviderStore().get_git_providers():
-            details = provider.details
-            if (
-                isinstance(details, OAuthProviderDetails)
-                and details.provider_type == idp
-            ):
-                return provider
-        return None
-
     async def get_user_id_from_idp_user_id(
         self, idp_user_id: str, idp: ProviderType
     ) -> str | None:
-        provider = await self._get_oauth_v2_git_provider(idp)
+        provider = await AuthProviderStore().get_git_provider(idp)
         if provider is not None:
             link = await OAuthProviderUserStore().get(provider.id, str(idp_user_id))
             if link is not None:

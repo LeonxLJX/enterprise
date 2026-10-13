@@ -1,4 +1,5 @@
 import asyncio
+from uuid import UUID
 
 from pydantic import SecretStr
 from sqlalchemy import select
@@ -9,17 +10,12 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 
 
 async def _user_has_gitlab_provider(user_id: str) -> bool:
-    """Check if the user has authenticated with GitLab.
-
-    Args:
-        user_id: The Keycloak user ID
-
-    Returns:
-        True if the user has a GitLab provider token, False otherwise
-    """
+    """Check if the user has a GitLab token, from Keycloak or OAuth v2."""
     # Lazy import to avoid circular dependency issues at module load time
+    from storage.auth_provider_store import AuthProviderStore
     from storage.auth_tokens import AuthTokens
     from storage.database import a_session_maker
+    from storage.oauth_token_store import OAuthTokenStore
 
     async with a_session_maker() as session:
         result = await session.execute(
@@ -28,7 +24,14 @@ async def _user_has_gitlab_provider(user_id: str) -> bool:
                 AuthTokens.identity_provider == ProviderType.GITLAB.value,
             )
         )
-        return result.scalars().first() is not None
+        if result.scalars().first() is not None:
+            return True
+
+    provider = await AuthProviderStore().get_git_provider(ProviderType.GITLAB)
+    if provider is None:
+        return False
+    token_store = OAuthTokenStore(user_id=UUID(user_id), oauth_provider_id=provider.id)
+    return await token_store.get_raw() is not None
 
 
 def schedule_gitlab_repo_sync(

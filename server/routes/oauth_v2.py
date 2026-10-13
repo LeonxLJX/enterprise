@@ -31,9 +31,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
+from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.user_auth import get_user_id
 from openhands.app_server.utils.http_session import httpx_verify_option
 from openhands.app_server.utils.logger import openhands_logger as logger
+from server.auth.gitlab_sync import schedule_gitlab_repo_sync
 from server.utils.url_utils import get_cookie_domain, get_cookie_samesite, get_web_url
 from storage.auth_provider import AuthProvider
 from storage.auth_provider_details import OAuthProviderDetails, PasswordProviderDetails
@@ -407,36 +409,39 @@ async def oauth_v2_login(
             target = f'{target}?{urlencode(params)}'
         return RedirectResponse(target, status_code=302)
 
-    details = _oauth_details(provider)
-    auth_url = details.authorization_url
-    if not auth_url:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f'Provider {provider_id} has no authorization_url',
-        )
-
     state = OAuthState(
         redirect_url=redirect_url,
         mode=mode,
         nonce=str(time.time()),
     )
-    encrypted_state = _encrypt_state(state.model_dump())
+    return RedirectResponse(_authorization_url(request, provider, state))
+
+
+def _authorization_url(
+    request: Request, provider: AuthProvider, state: OAuthState
+) -> str:
+    """The provider's authorization URL for ``state``, returning to our callback."""
+    details = _oauth_details(provider)
+    auth_url = details.authorization_url
+    if not auth_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Provider {provider.id} has no authorization_url',
+        )
 
     web_url = get_web_url(request)
-    callback_uri = f'{web_url}/oauth/{provider_id}/callback'
-
     params = {
         'client_id': details.client_id,
-        'redirect_uri': callback_uri,
+        'redirect_uri': f'{web_url}/oauth/{provider.id}/callback',
         'response_type': 'code',
-        'state': encrypted_state,
+        'state': _encrypt_state(state.model_dump()),
     }
     scopes = details.scopes or []
     if scopes:
         params['scope'] = ' '.join(scopes)
 
     separator = '&' if '?' in auth_url else '?'
-    return RedirectResponse(f'{auth_url}{separator}{urlencode(params)}')
+    return f'{auth_url}{separator}{urlencode(params)}'
 
 
 @oauth_v2_router.get('/{provider_id}/callback')
@@ -526,6 +531,14 @@ async def oauth_v2_callback(
         access_token_expires_at=access_exp,
         refresh_token_expires_at=refresh_exp,
     )
+    # Records the user's projects and groups as gitlab_webhook rows for the
+    # webhook installer. Integrated-IDP sessions never refresh an IDP token,
+    # so the middleware's refresh-time sync would never run for them.
+    if (
+        isinstance(provider.details, OAuthProviderDetails)
+        and provider.details.provider_type == ProviderType.GITLAB
+    ):
+        schedule_gitlab_repo_sync(user_id)
 
     redirect_url = state_data.redirect_url or '/'
 
@@ -561,9 +574,9 @@ async def oauth_v2_link(
 ):
     """Link a git provider to the signed-in user.
 
-    Returns a JSON body with a ``start_url`` to ``/oauth/{provider_id}/login``
-    in link mode, which the frontend navigates the browser to. The callback
-    completes the link.
+    Returns a JSON body with a ``start_url``: the provider's authorization
+    URL, carrying an encrypted link-mode state bound to ``user_id``. The
+    frontend navigates the browser to it; the callback completes the link.
     """
     if not user_id:
         raise HTTPException(
@@ -576,22 +589,15 @@ async def oauth_v2_link(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='Cannot link an IDP provider; use login instead',
         )
-    web_url = get_web_url(request)
     link_state = OAuthState(
-        redirect_url=f'{web_url}/settings/integrations',
+        redirect_url=f'{get_web_url(request)}/settings/integrations',
         mode='link',
         user_id=user_id,
         nonce=str(time.time()),
     )
-    encrypted = _encrypt_state(link_state.model_dump())
-    start_url = (
-        f'{web_url}/oauth/{provider_id}/login'
-        f'?mode=link&redirect_url={web_url}/settings/integrations'
-        f'&_state={encrypted}'
-    )
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={'start_url': start_url},
+        content={'start_url': _authorization_url(request, provider, link_state)},
     )
 
 
@@ -639,6 +645,11 @@ async def oauth_v2_list_providers():
                 'kind': p.kind,
                 'title': p.title,
                 'is_idp': p.is_idp,
+                'provider_type': (
+                    p.details.provider_type.value
+                    if isinstance(p.details, OAuthProviderDetails)
+                    else None
+                ),
             }
             for p in providers
         ]

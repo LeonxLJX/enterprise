@@ -19,6 +19,7 @@ from integrations.v1_utils import get_saas_user_auth
 from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.services.jwt_service import JwtService
 from openhands.app_server.utils.encryption_key import EncryptionKey
+from server.auth.gitlab_sync import _user_has_gitlab_provider
 from server.auth.saas_user_auth import SaasUserAuth
 from server.auth.token_manager import TokenManager
 from storage.auth_provider import AuthProvider
@@ -44,6 +45,7 @@ def no_keycloak(async_session_maker):
         patch('storage.oauth_provider_user_store.a_session_maker', async_session_maker),
         patch('storage.oauth_token_store.a_session_maker', async_session_maker),
         patch('storage.offline_token_store.a_session_maker', async_session_maker),
+        patch('storage.database.a_session_maker', async_session_maker),
         patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
         patch('server.auth.token_manager.KEYCLOAK_SERVER_URL', ''),
         patch('server.auth.token_manager.get_keycloak_admin', _fail_keycloak),
@@ -183,6 +185,18 @@ async def test_resolver_user_auth_reads_oauth_v2_git_tokens(linked_user_id):
     assert provider_tokens[ProviderType.GITLAB].token.get_secret_value() == (
         GITLAB_TOKEN
     )
+
+
+@pytest.mark.asyncio
+async def test_background_repo_sync_runs_for_oauth_v2_gitlab_user(linked_user_id):
+    assert await _user_has_gitlab_provider(linked_user_id) is True
+
+
+@pytest.mark.asyncio
+async def test_background_repo_sync_skips_user_without_gitlab(
+    gitlab_provider, create_user
+):
+    assert await _user_has_gitlab_provider(str(create_user().id)) is False
 
 
 @pytest.mark.asyncio
