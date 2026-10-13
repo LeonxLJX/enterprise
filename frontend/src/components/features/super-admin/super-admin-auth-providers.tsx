@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Plus } from "lucide-react";
 import { OrgModal } from "#/components/shared/modals/org-modal";
@@ -8,6 +8,7 @@ import { SettingsDropdownInput } from "#/components/features/settings/settings-d
 import {
   useCreateAuthProvider,
   useDeleteAuthProvider,
+  usePreviewSamlMetadata,
   useUpdateAuthProvider,
 } from "#/hooks/mutation/use-auth-provider-mutations";
 import { useAuthProviders } from "#/hooks/query/use-auth-providers";
@@ -16,8 +17,11 @@ import type {
   AuthProviderDetails,
   CreateAuthProviderParams,
   OAuthProviderBrand,
+  SamlIdpMetadata,
+  SamlSsoBinding,
   UpdateAuthProviderParams,
 } from "#/api/auth-providers-service/auth-providers.types";
+import { retrieveAxiosErrorMessage } from "#/utils/retrieve-axios-error-message";
 import { I18nKey } from "#/i18n/declaration";
 import {
   SUPER_ADMIN_NAV_ITEMS,
@@ -26,6 +30,7 @@ import {
 import {
   BrandButton,
   SettingsInput,
+  SettingsTextarea,
   SuperAdminPageHeader,
   SuperAdminRowMenu,
   SuperAdminTable,
@@ -39,7 +44,7 @@ function navCopy(path: string) {
 }
 
 /** Mirrors ``storage.auth_provider_details.AuthProviderDetails.kind`` for
- * the two kinds the form supports today -- SAML is a follow-up. */
+ * the three kinds the form supports. */
 const KIND_OAUTH = "OAuthProviderDetails" as const;
 const KIND_PASSWORD = "PasswordProviderDetails" as const;
 const KIND_SAML = "SamlProviderDetails" as const;
@@ -80,10 +85,42 @@ function parseScopes(value: string): string[] | null {
   return scopes.length > 0 ? scopes : null;
 }
 
+/** Parses the attribute-mapping field's ``saml_attr=openhands_field``
+ * comma/newline-separated text into ``SamlProviderDetails.attribute_mapping``.
+ * Blank entries and entries missing a ``=`` are dropped. */
+function parseAttributeMapping(value: string): Record<string, string> {
+  const mapping: Record<string, string> = {};
+  value
+    .split(/[\n,]+/)
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .forEach((pair) => {
+      const separatorIndex = pair.indexOf("=");
+      if (separatorIndex <= 0) {
+        return;
+      }
+      const key = pair.slice(0, separatorIndex).trim();
+      const mappedTo = pair.slice(separatorIndex + 1).trim();
+      if (key && mappedTo) {
+        mapping[key] = mappedTo;
+      }
+    });
+  return mapping;
+}
+
+/** Inverse of ``parseAttributeMapping``, for populating the form from an
+ * existing provider. */
+function formatAttributeMapping(mapping: Record<string, string>): string {
+  return Object.entries(mapping)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+}
+
 const DEFAULT_PERMITTED_DRIFT_SECONDS = "60";
+const DEFAULT_SSO_BINDING: SamlSsoBinding = "redirect";
 
 interface AuthProviderFormState {
-  kind: typeof KIND_OAUTH | typeof KIND_PASSWORD;
+  kind: typeof KIND_OAUTH | typeof KIND_PASSWORD | typeof KIND_SAML;
   title: string;
   isIdp: boolean;
   providerType: OAuthProviderBrand;
@@ -94,6 +131,24 @@ interface AuthProviderFormState {
   userinfoUrl: string;
   scopes: string;
   permittedDriftSeconds: string;
+  metadataUrl: string;
+  idpEntityId: string;
+  ssoUrl: string;
+  ssoBinding: SamlSsoBinding;
+  sloUrl: string;
+  idpX509Cert: string;
+  /** Read-only: the SP's auto-generated signing public key, for the admin
+   * to copy into the IdP's trusted-SP configuration. Empty until the row
+   * has been saved at least once -- ``sp_private_key``/its derived public
+   * half are never typed, only generated server-side (see
+   * ``server.routes.oauth_providers_admin._ensure_sp_keypair``). */
+  spPublicKey: string;
+  nameIdFormat: string;
+  /** Not rendered in the form (see ``SUPER_ADMIN$AUTH_PROVIDER_...``
+   * fields below) -- kept here only so an existing row's mapping, if any
+   * was set directly via the API, round-trips through an edit untouched
+   * instead of being silently cleared to ``{}``. */
+  attributeMapping: string;
 }
 
 const EMPTY_FORM: AuthProviderFormState = {
@@ -108,23 +163,50 @@ const EMPTY_FORM: AuthProviderFormState = {
   userinfoUrl: "",
   scopes: "",
   permittedDriftSeconds: DEFAULT_PERMITTED_DRIFT_SECONDS,
+  metadataUrl: "",
+  idpEntityId: "",
+  ssoUrl: "",
+  ssoBinding: DEFAULT_SSO_BINDING,
+  sloUrl: "",
+  idpX509Cert: "",
+  spPublicKey: "",
+  nameIdFormat: "",
+  attributeMapping: "",
 };
 
 function toFormState(provider: AuthProvider): AuthProviderFormState {
   if (provider.details.kind === KIND_OAUTH) {
     const { details } = provider;
     return {
+      ...EMPTY_FORM,
       kind: KIND_OAUTH,
       title: provider.title,
       isIdp: provider.is_idp,
       providerType: details.provider_type,
       clientId: details.client_id,
-      clientSecret: "",
       authorizationUrl: details.authorization_url ?? "",
       tokenUrl: details.token_url ?? "",
       userinfoUrl: details.userinfo_url ?? "",
       scopes: details.scopes?.join(" ") ?? "",
       permittedDriftSeconds: String(details.permitted_drift_seconds),
+    };
+  }
+  if (provider.details.kind === KIND_SAML) {
+    const { details } = provider;
+    return {
+      ...EMPTY_FORM,
+      kind: KIND_SAML,
+      title: provider.title,
+      isIdp: true,
+      metadataUrl: details.metadata_url ?? "",
+      idpEntityId: details.idp_entity_id ?? "",
+      ssoUrl: details.sso_url ?? "",
+      ssoBinding: details.sso_binding,
+      sloUrl: details.slo_url ?? "",
+      idpX509Cert: details.idp_x509_cert ?? "",
+      spPublicKey: details.sp_public_key ?? "",
+      nameIdFormat: details.name_id_format ?? "",
+      attributeMapping: formatAttributeMapping(details.attribute_mapping),
     };
   }
   return {
@@ -153,9 +235,48 @@ function oauthDetailsUnchanged(
   );
 }
 
+/** Whether every SAML-specific field (everything except the private key,
+ * which has its own clear-vs-keep handling) is unchanged from ``initial``
+ * -- see ``buildUpdatePayload`` for why this matters. */
+function samlDetailsUnchanged(
+  form: AuthProviderFormState,
+  initial: AuthProviderFormState,
+): boolean {
+  return (
+    form.metadataUrl.trim() === initial.metadataUrl.trim() &&
+    form.idpEntityId.trim() === initial.idpEntityId.trim() &&
+    form.ssoUrl.trim() === initial.ssoUrl.trim() &&
+    form.ssoBinding === initial.ssoBinding &&
+    form.sloUrl.trim() === initial.sloUrl.trim() &&
+    form.idpX509Cert.trim() === initial.idpX509Cert.trim() &&
+    form.nameIdFormat.trim() === initial.nameIdFormat.trim() &&
+    form.attributeMapping.trim() === initial.attributeMapping.trim()
+  );
+}
+
 function buildDetails(form: AuthProviderFormState): AuthProviderDetails {
   if (form.kind === KIND_PASSWORD) {
     return { kind: KIND_PASSWORD };
+  }
+  if (form.kind === KIND_SAML) {
+    return {
+      kind: KIND_SAML,
+      metadata_url: form.metadataUrl.trim() || null,
+      idp_entity_id: form.idpEntityId.trim() || null,
+      sso_url: form.ssoUrl.trim() || null,
+      sso_binding: form.ssoBinding,
+      slo_url: form.sloUrl.trim() || null,
+      idp_x509_cert: form.idpX509Cert.trim() || null,
+      // Never admin-supplied -- auto-generated server-side the first time
+      // this row becomes SAML, then carried forward on every later edit
+      // (see ``server.routes.oauth_providers_admin._ensure_sp_keypair``).
+      sp_private_key: null,
+      // Derived server-side from ``sp_private_key`` -- never client-supplied,
+      // and ignored by the server if sent (see type doc comment).
+      sp_public_key: null,
+      name_id_format: form.nameIdFormat.trim() || null,
+      attribute_mapping: parseAttributeMapping(form.attributeMapping),
+    };
   }
   return {
     kind: KIND_OAUTH,
@@ -192,6 +313,45 @@ function AuthProviderFormModal({
 }: AuthProviderFormModalProps) {
   const { t } = useTranslation();
   const [form, setForm] = useState<AuthProviderFormState>(initial);
+  const [metadataFetchError, setMetadataFetchError] = useState<string | null>(
+    null,
+  );
+  const previewSamlMetadata = usePreviewSamlMetadata();
+  // Guards against re-fetching on every blur (e.g. tabbing through the form
+  // without touching this field again) -- only a URL not yet fetched
+  // triggers a request.
+  const lastFetchedMetadataUrl = useRef<string | null>(null);
+
+  const handleMetadataUrlBlur = () => {
+    const metadataUrl = form.metadataUrl.trim();
+    if (!metadataUrl || metadataUrl === lastFetchedMetadataUrl.current) {
+      return;
+    }
+    lastFetchedMetadataUrl.current = metadataUrl;
+    setMetadataFetchError(null);
+    previewSamlMetadata.mutate(metadataUrl, {
+      onSuccess: (data: SamlIdpMetadata) => {
+        setForm((prev) => ({
+          ...prev,
+          idpEntityId: data.idp_entity_id ?? prev.idpEntityId,
+          ssoUrl: data.sso_url ?? prev.ssoUrl,
+          ssoBinding: data.sso_binding ?? prev.ssoBinding,
+          sloUrl: data.slo_url ?? prev.sloUrl,
+          idpX509Cert: data.idp_x509_cert ?? prev.idpX509Cert,
+          nameIdFormat: data.name_id_format ?? prev.nameIdFormat,
+        }));
+      },
+      onError: (error) => {
+        // Let the admin retry the same URL (e.g. once their IdP's metadata
+        // endpoint is live) instead of silently no-op'ing on the next blur.
+        lastFetchedMetadataUrl.current = null;
+        setMetadataFetchError(
+          retrieveAxiosErrorMessage(error) ||
+            t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_METADATA_FETCH_ERROR),
+        );
+      },
+    });
+  };
 
   const kindOptions = [
     {
@@ -202,11 +362,32 @@ function AuthProviderFormModal({
       key: KIND_PASSWORD,
       label: t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_KIND_PASSWORD),
     },
+    {
+      key: KIND_SAML,
+      label: t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_KIND_SAML),
+    },
   ];
 
+  const ssoBindingOptions: { key: SamlSsoBinding; label: string }[] = [
+    {
+      key: "redirect",
+      label: t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SSO_BINDING_REDIRECT),
+    },
+    {
+      key: "post",
+      label: t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SSO_BINDING_POST),
+    },
+  ];
+
+  // SAML has no required field beyond the title: the IdP fields below are
+  // all optional at creation time (see the hint rendered above them) --
+  // plenty of IdPs won't hand over their entity ID/SSO URL/cert until
+  // *after* they've been given this row's SP public key and URLs, so the
+  // row has to be creatable (to generate that key) before any of them are
+  // known.
   const canSubmit =
     form.title.trim() !== "" &&
-    (form.kind === KIND_PASSWORD || form.clientId.trim() !== "");
+    (form.kind === KIND_OAUTH ? form.clientId.trim() !== "" : true);
 
   return (
     <OrgModal
@@ -238,8 +419,11 @@ function AuthProviderFormModal({
             if (key) {
               setForm((prev) => ({
                 ...prev,
-                kind: key as typeof KIND_OAUTH | typeof KIND_PASSWORD,
-                isIdp: key === KIND_PASSWORD ? true : prev.isIdp,
+                kind: key as
+                  | typeof KIND_OAUTH
+                  | typeof KIND_PASSWORD
+                  | typeof KIND_SAML,
+                isIdp: key === KIND_OAUTH ? prev.isIdp : true,
               }));
             }
           }}
@@ -369,6 +553,141 @@ function AuthProviderFormModal({
             />
           </>
         ) : null}
+        {form.kind === KIND_SAML ? (
+          <>
+            <p
+              data-testid="super-admin-auth-provider-saml-fields-optional-hint"
+              className="text-xs text-tertiary-alt"
+            >
+              {t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SAML_FIELDS_OPTIONAL_HINT)}
+            </p>
+            <SettingsInput
+              testId="super-admin-auth-provider-metadata-url"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_METADATA_URL)}
+              type="text"
+              value={form.metadataUrl}
+              description={
+                <p
+                  data-testid="super-admin-auth-provider-metadata-url-hint"
+                  className="text-xs text-tertiary-alt"
+                >
+                  {t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_METADATA_URL_HINT)}
+                </p>
+              }
+              onChange={(value) => {
+                setForm((prev) => ({ ...prev, metadataUrl: value }));
+                setMetadataFetchError(null);
+              }}
+              onBlur={handleMetadataUrlBlur}
+              error={metadataFetchError ?? undefined}
+              showOptionalTag
+              autoComplete="off"
+            />
+            {previewSamlMetadata.isPending ? (
+              <p
+                data-testid="super-admin-auth-provider-metadata-url-loading"
+                className="text-xs text-tertiary-alt"
+              >
+                {t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_METADATA_FETCHING)}
+              </p>
+            ) : null}
+            <SettingsInput
+              testId="super-admin-auth-provider-idp-entity-id"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_IDP_ENTITY_ID)}
+              type="text"
+              value={form.idpEntityId}
+              onChange={(value) =>
+                setForm((prev) => ({ ...prev, idpEntityId: value }))
+              }
+              showOptionalTag
+              autoComplete="off"
+            />
+            <SettingsInput
+              testId="super-admin-auth-provider-sso-url"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SSO_URL)}
+              type="text"
+              value={form.ssoUrl}
+              onChange={(value) =>
+                setForm((prev) => ({ ...prev, ssoUrl: value }))
+              }
+              showOptionalTag
+              autoComplete="off"
+            />
+            <SettingsDropdownInput
+              testId="super-admin-auth-provider-sso-binding"
+              name="sso_binding"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SSO_BINDING)}
+              items={ssoBindingOptions}
+              selectedKey={form.ssoBinding}
+              onSelectionChange={(key) => {
+                if (key) {
+                  setForm((prev) => ({
+                    ...prev,
+                    ssoBinding: key as SamlSsoBinding,
+                  }));
+                }
+              }}
+              required
+            />
+            <SettingsInput
+              testId="super-admin-auth-provider-slo-url"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SLO_URL)}
+              type="text"
+              value={form.sloUrl}
+              onChange={(value) =>
+                setForm((prev) => ({ ...prev, sloUrl: value }))
+              }
+              showOptionalTag
+              autoComplete="off"
+            />
+            <SettingsTextarea
+              testId="super-admin-auth-provider-idp-x509-cert"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_IDP_X509_CERT)}
+              value={form.idpX509Cert}
+              onChange={(value) =>
+                setForm((prev) => ({ ...prev, idpX509Cert: value }))
+              }
+              rows={8}
+              showOptionalTag
+            />
+            {form.spPublicKey ? (
+              <SettingsInput
+                testId="super-admin-auth-provider-sp-public-key"
+                label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SP_PUBLIC_KEY)}
+                type="text"
+                value={form.spPublicKey}
+                description={
+                  <p
+                    data-testid="super-admin-auth-provider-sp-public-key-hint"
+                    className="text-xs text-tertiary-alt"
+                  >
+                    {t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SP_PUBLIC_KEY_HINT)}
+                  </p>
+                }
+                isReadOnly
+                onChange={() => {}}
+              />
+            ) : (
+              <p
+                data-testid="super-admin-auth-provider-sp-public-key-pending"
+                className="text-xs text-tertiary-alt"
+              >
+                {t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_SP_PUBLIC_KEY_PENDING)}
+              </p>
+            )}
+            <SettingsInput
+              testId="super-admin-auth-provider-name-id-format"
+              label={t(I18nKey.SUPER_ADMIN$AUTH_PROVIDER_NAME_ID_FORMAT)}
+              type="text"
+              value={form.nameIdFormat}
+              onChange={(value) =>
+                setForm((prev) => ({ ...prev, nameIdFormat: value }))
+              }
+              showOptionalTag
+              autoComplete="off"
+            />
+          </>
+        ) : null}
       </div>
     </OrgModal>
   );
@@ -377,7 +696,7 @@ function AuthProviderFormModal({
 /** ``details`` is replaced wholesale when present at all -- see
  * ``server.routes.oauth_providers_admin.UpdateAuthProviderRequest``. So,
  * for an edit, ``details`` is only sent if something about it actually
- * changed (the kind, an OAuth field, or a newly-typed secret); a pure
+ * changed (the kind, an OAuth/SAML field, or a newly-typed secret); a pure
  * title/is_idp edit omits it entirely, which is what preserves the
  * existing (never-exposed) secret. */
 function buildUpdatePayload(
@@ -385,10 +704,16 @@ function buildUpdatePayload(
   initial: AuthProviderFormState,
 ): UpdateAuthProviderParams {
   const kindChanged = form.kind !== initial.kind;
+  // SAML has no equivalent: the SP key is never admin-typed, so there is
+  // nothing here that mirrors the OAuth client secret's "blank means keep,
+  // non-blank means replace" contract.
   const secretTyped = form.kind === KIND_OAUTH && form.clientSecret !== "";
   const oauthFieldsChanged =
     form.kind === KIND_OAUTH && !oauthDetailsUnchanged(form, initial);
-  const detailsChanged = kindChanged || secretTyped || oauthFieldsChanged;
+  const samlFieldsChanged =
+    form.kind === KIND_SAML && !samlDetailsUnchanged(form, initial);
+  const detailsChanged =
+    kindChanged || secretTyped || oauthFieldsChanged || samlFieldsChanged;
 
   return {
     title: form.title.trim(),

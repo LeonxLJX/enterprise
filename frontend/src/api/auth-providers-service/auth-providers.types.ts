@@ -37,11 +37,57 @@ export interface PasswordProviderDetails {
   kind: "PasswordProviderDetails";
 }
 
-/** Mirrors ``storage.auth_provider_details.AuthProviderDetails``. SAML
- * support is a follow-up (``SamlProviderDetails`` on the backend). */
+/** The two bindings ``SamlProviderDetails.sso_binding`` accepts -- mirrors
+ * the backend's ``Literal['redirect', 'post']``. */
+export type SamlSsoBinding = "redirect" | "post";
+
+/** Mirrors ``storage.auth_provider_details.SamlProviderDetails``.
+ *
+ * ``sp_private_key`` is never admin-supplied and never returned by the
+ * server as its real value -- the admin API always sends ``null`` for it on
+ * create/update (the server auto-generates/carries one forward regardless,
+ * see ``server.routes.oauth_providers_admin._ensure_sp_keypair``), and
+ * responses only ever echo a masked placeholder when one is configured, or
+ * ``null`` when it isn't.
+ *
+ * ``sp_public_key`` is the PEM-encoded public half of that key, derived
+ * fresh on every read (a Pydantic ``computed_field``, not its own stored
+ * column) -- it is what the admin copies into the IdP's trusted-SP/ACS
+ * signing-certificate configuration. ``null`` until a key has been
+ * generated, i.e. until the row has been saved at least once as SAML.
+ */
+export interface SamlProviderDetails {
+  kind: "SamlProviderDetails";
+  metadata_url: string | null;
+  idp_entity_id: string | null;
+  sso_url: string | null;
+  sso_binding: SamlSsoBinding;
+  slo_url: string | null;
+  idp_x509_cert: string | null;
+  sp_private_key: string | null;
+  sp_public_key: string | null;
+  name_id_format: string | null;
+  attribute_mapping: Record<string, string>;
+}
+
+/** Mirrors ``server.services.saml_metadata.SamlIdpMetadata`` -- the
+ * ``POST /api/admin/oauth-providers/saml-metadata-preview`` response, used
+ * to prefill the rest of the SAML form from a metadata URL. Any field may
+ * be ``null`` if the IdP's metadata document didn't declare it. */
+export interface SamlIdpMetadata {
+  idp_entity_id: string | null;
+  sso_url: string | null;
+  sso_binding: SamlSsoBinding | null;
+  slo_url: string | null;
+  idp_x509_cert: string | null;
+  name_id_format: string | null;
+}
+
+/** Mirrors ``storage.auth_provider_details.AuthProviderDetails``. */
 export type AuthProviderDetails =
   | OAuthProviderDetails
-  | PasswordProviderDetails;
+  | PasswordProviderDetails
+  | SamlProviderDetails;
 
 /** A single ``auth_providers`` row, as returned by the admin API. */
 export interface AuthProvider {
