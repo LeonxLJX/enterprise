@@ -7,7 +7,8 @@ Keycloak is unconfigured; any call to it fails the test.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -139,6 +140,39 @@ async def test_unlinked_gitlab_user_is_none_without_keycloak(linked_user_id):
 
 
 @pytest.mark.asyncio
+async def test_unlinked_gitlab_user_falls_back_to_keycloak(linked_user_id):
+    admin = MagicMock()
+    admin.a_get_users = AsyncMock(return_value=[{'id': 'kc-user'}])
+    with (
+        patch('server.auth.token_manager.KEYCLOAK_SERVER_URL', 'https://kc.test'),
+        patch('server.auth.token_manager.get_keycloak_admin', return_value=admin),
+    ):
+        user_id = await TokenManager().get_user_id_from_idp_user_id(
+            999, ProviderType.GITLAB
+        )
+
+    assert user_id == 'kc-user'
+    admin.a_get_users.assert_awaited_once_with({'q': 'gitlab_id:999'})
+
+
+@pytest.mark.asyncio
+async def test_gitlab_link_does_not_answer_for_other_providers(linked_user_id):
+    token_manager = TokenManager()
+    assert (
+        await token_manager.get_user_id_from_idp_user_id(
+            GITLAB_USER_ID, ProviderType.GITHUB
+        )
+        is None
+    )
+    assert (
+        await token_manager.get_git_provider_token_for_user(
+            linked_user_id, ProviderType.GITHUB
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_gitlab_token_from_idp_user_id(linked_user_id):
     token = await TokenManager().get_idp_token_from_idp_user_id(
         str(GITLAB_USER_ID), ProviderType.GITLAB
@@ -152,6 +186,57 @@ async def test_gitlab_token_missing_for_user_without_link(gitlab_provider, creat
         str(create_user().id), ProviderType.GITLAB
     )
     assert token is None
+
+
+@pytest.mark.asyncio
+async def test_keycloak_offline_token_used_when_no_oauth_v2_token(
+    gitlab_provider, create_user
+):
+    user_id = str(create_user().id)
+    token_manager = TokenManager()
+    await token_manager.store_offline_token(user_id, 'offline')
+    # Exchanging the offline token is a Keycloak network call.
+    with patch.object(
+        TokenManager,
+        'get_idp_token_from_offline_token',
+        new=AsyncMock(return_value='glpat-from-keycloak'),
+    ) as exchange:
+        token = await token_manager.get_git_provider_token_for_user(
+            user_id, ProviderType.GITLAB
+        )
+
+    assert token == 'glpat-from-keycloak'
+    exchange.assert_awaited_once_with(offline_token='offline', idp=ProviderType.GITLAB)
+
+
+@pytest.mark.asyncio
+async def test_expired_gitlab_token_is_refreshed(gitlab_provider, create_user):
+    user_id = create_user().id
+    await OAuthTokenStore(
+        user_id=user_id, oauth_provider_id=gitlab_provider.id
+    ).store_tokens(
+        access_token='glpat-expired',
+        refresh_token='refresh',
+        access_token_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        refresh_token_expires_at=None,
+    )
+    # The provider's token endpoint is the only thing faked.
+    response = MagicMock(status_code=200, headers={'content-type': 'application/json'})
+    response.json.return_value = {
+        'access_token': 'glpat-fresh',
+        'refresh_token': 'refresh-2',
+        'expires_in': 7200,
+    }
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=response)
+    client.__aenter__.return_value = client
+    with patch('server.auth.oauth_v2_refresh.httpx.AsyncClient', return_value=client):
+        token = await TokenManager().get_git_provider_token_for_user(
+            str(user_id), ProviderType.GITLAB
+        )
+
+    assert token == 'glpat-fresh'
+    assert client.post.await_args.args[0] == 'https://gitlab.example.com/oauth/token'
 
 
 @pytest.mark.asyncio

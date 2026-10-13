@@ -98,7 +98,9 @@ class AuthProviderStore:
     async def get_git_providers(self) -> list[AuthProvider]:
         async with a_session_maker() as session:
             result = await session.execute(
-                select(AuthProvider).where(AuthProvider.is_idp.is_(False))
+                select(AuthProvider)
+                .where(AuthProvider.is_idp.is_(False))
+                .order_by(AuthProvider.id)
             )
             return list(result.scalars().all())
 

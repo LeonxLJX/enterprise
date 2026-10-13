@@ -116,6 +116,8 @@ describe("GitProviderConnection", () => {
       );
       vi.spyOn(OAuthService, "listProviders").mockResolvedValue([
         oauthProvider({ id: 1, kind: "PasswordProviderDetails", is_idp: true }),
+        // A login IdP of the same brand; /link rejects IdP rows.
+        oauthProvider({ id: 2, is_idp: true, provider_type: "github" }),
         oauthProvider({ id: 7, provider_type: "gitlab" }),
         oauthProvider({ id: 3, provider_type: "github" }),
       ]);
@@ -144,6 +146,35 @@ describe("GitProviderConnection", () => {
       );
     },
   );
+
+  it("should disable Connect while the OAuth v2 link is starting", async () => {
+    // Arrange
+    vi.spyOn(OptionService, "getConfig").mockResolvedValue(
+      createMockWebClientConfig({
+        app_mode: "saas",
+        feature_flags: { ...defaultFeatureFlags, enable_integrated_idp: true },
+      }),
+    );
+    vi.spyOn(OAuthService, "listProviders").mockResolvedValue([
+      oauthProvider({ id: 3, provider_type: "github" }),
+    ]);
+    const startLinkSpy = vi
+      .spyOn(OAuthService, "startLink")
+      .mockReturnValue(new Promise(() => {}));
+    renderComponent(false);
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(QUERY_KEYS.WEB_CLIENT_CONFIG),
+      ).toBeDefined(),
+    );
+
+    // Act
+    await userEvent.click(screen.getByTestId("connect-github-button"));
+
+    // Assert
+    await waitFor(() => expect(startLinkSpy).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("connect-github-button")).toBeDisabled();
+  });
 
   it("should show an error toast when the provider has no OAuth v2 row", async () => {
     // Arrange
