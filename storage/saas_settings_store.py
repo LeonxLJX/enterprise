@@ -300,10 +300,13 @@ class SaasSettingsStore(SettingsStore):
                 raise HTTPException(422, detail={'code': 'agent_profile_unreadable'})
             raise HTTPException(404, detail={'code': 'agent_profile_not_found'})
         try:
-            profile = profiles.load(name)
             mcp_config = coerce_persisted_mcp_config(
                 merged_agent_settings.get('mcp_config') or {}
             )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, detail={'code': 'invalid_mcp_config'}) from exc
+        try:
+            profile = profiles.load(name)
             launched = resolve(
                 profile,
                 org_launch_stores(
@@ -323,10 +326,6 @@ class SaasSettingsStore(SettingsStore):
             raise HTTPException(
                 503 if exc.retryable else 500,
                 detail={'code': 'agent_profile_store_unavailable'},
-            ) from exc
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                422, detail={'code': 'invalid_agent_profile_config'}
             ) from exc
         except Exception as exc:
             logger.error('Agent profile resolution failed: %s', type(exc).__name__)

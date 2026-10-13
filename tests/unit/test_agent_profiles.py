@@ -1192,9 +1192,10 @@ class TestPersistedVsResolvedSettingsView:
                 'browser_tool_set' in {tool.name for tool in agent.tools}
             ) is available
 
+    @pytest.mark.parametrize('error_type', [RuntimeError, TypeError])
     @pytest.mark.asyncio
     async def test_resolver_failure_rejects_launch_but_settings_remain_readable(
-        self, async_session_maker, patch_agent_routes
+        self, async_session_maker, patch_agent_routes, error_type
     ):
         from storage.saas_settings_store import SaasSettingsStore
 
@@ -1204,7 +1205,7 @@ class TestPersistedVsResolvedSettingsView:
             self._store_patches(async_session_maker),
             patch(
                 'storage.saas_settings_store.resolve',
-                side_effect=RuntimeError('store unavailable'),
+                side_effect=error_type('store unavailable'),
             ),
         ):
             store = SaasSettingsStore(str(USER_ID), effective_org_id=org_id)
