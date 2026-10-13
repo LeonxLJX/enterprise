@@ -9,6 +9,7 @@ from openhands.app_server.user_auth.user_auth import UserAuth
 from openhands.app_server.utils.logger import openhands_logger as logger
 from server.auth.saas_user_auth import SaasUserAuth
 from server.auth.token_manager import TokenManager
+from storage.oauth_provider_user_store import OAuthProviderUserStore
 
 
 def is_budget_exceeded_error(error_message: str) -> bool:
@@ -135,6 +136,14 @@ async def get_saas_user_auth(
     offline_token = await token_manager.load_offline_token(keycloak_user_id)
     if offline_token is None:
         logger.info('no_offline_token_found')
+        # Users who signed in through OAuth v2 (e.g. the integrated IDP, with
+        # no Keycloak) have their git tokens in ``oauth_tokens``.
+        if await OAuthProviderUserStore().list_for_user(UUID(keycloak_user_id)):
+            return SaasUserAuth(
+                user_id=keycloak_user_id,
+                refresh_token=SecretStr(''),
+                oauth_v2_cookie=True,
+            )
 
     user_auth = SaasUserAuth(
         user_id=keycloak_user_id,

@@ -3,6 +3,7 @@ import base64
 import json
 import time
 from urllib.parse import parse_qs
+from uuid import UUID
 
 import httpx
 import jwt
@@ -51,10 +52,19 @@ from server.auth.email_validation import (
     matches_base_email,
 )
 from server.auth.keycloak_manager import get_keycloak_admin, get_keycloak_openid
+from server.auth.oauth_v2_refresh import (
+    get_permitted_drift_seconds,
+    make_refresh_callback,
+)
 from server.logger import logger
+from storage.auth_provider import AuthProvider
+from storage.auth_provider_details import OAuthProviderDetails
+from storage.auth_provider_store import AuthProviderStore
 from storage.auth_token_store import AuthTokenStore
 from storage.database import a_session_maker
 from storage.github_app_installation import GithubAppInstallation
+from storage.oauth_provider_user_store import OAuthProviderUserStore
+from storage.oauth_token_store import OAuthTokenStore
 from storage.offline_token_store import OfflineTokenStore
 
 
@@ -619,13 +629,7 @@ class TokenManager:
             return None
 
         try:
-            offline_token = await self.load_offline_token(user_id=user_id)
-            if not offline_token:
-                logger.warning(f'No offline token found for user_id: {user_id}')
-                return None
-            return await self.get_idp_token_from_offline_token(
-                offline_token=offline_token, idp=idp
-            )
+            return await self.get_git_provider_token_for_user(user_id, idp)
         except KeycloakConnectionError:
             logger.exception(
                 f'KeycloakConnectionError when getting IDP token for IDP user_id {idp_user_id}',
@@ -633,9 +637,62 @@ class TokenManager:
             )
             raise
 
+    async def get_git_provider_token_for_user(
+        self, user_id: str, idp: ProviderType
+    ) -> str | None:
+        """Return ``user_id``'s access token at git provider ``idp``.
+
+        A token linked through OAuth v2 (``oauth_tokens``) is preferred: it
+        needs no Keycloak, so it works on installs using the integrated IDP.
+        Otherwise falls back to the legacy Keycloak offline session.
+        """
+        provider = await self._get_oauth_v2_git_provider(idp)
+        if provider is not None:
+            token = await OAuthTokenStore(
+                user_id=UUID(user_id), oauth_provider_id=provider.id
+            ).get_valid_access_token(
+                permitted_drift_seconds=get_permitted_drift_seconds(provider),
+                refresh=make_refresh_callback(provider),
+            )
+            if token:
+                return token
+
+        offline_token = await self.load_offline_token(user_id=user_id)
+        if not offline_token:
+            logger.warning(f'No {idp.value} token found for user_id: {user_id}')
+            return None
+        return await self.get_idp_token_from_offline_token(
+            offline_token=offline_token, idp=idp
+        )
+
+    async def _get_oauth_v2_git_provider(
+        self, idp: ProviderType
+    ) -> AuthProvider | None:
+        for provider in await AuthProviderStore().get_git_providers():
+            details = provider.details
+            if (
+                isinstance(details, OAuthProviderDetails)
+                and details.provider_type == idp
+            ):
+                return provider
+        return None
+
     async def get_user_id_from_idp_user_id(
         self, idp_user_id: str, idp: ProviderType
     ) -> str | None:
+        provider = await self._get_oauth_v2_git_provider(idp)
+        if provider is not None:
+            link = await OAuthProviderUserStore().get(provider.id, str(idp_user_id))
+            if link is not None:
+                return str(link.user_id)
+
+        if not KEYCLOAK_SERVER_URL:
+            logger.info(
+                f'{idp.value} user with IDP ID {idp_user_id} has no linked '
+                'account and Keycloak is not configured.'
+            )
+            return None
+
         keycloak_admin = get_keycloak_admin(self.external)
         users = await keycloak_admin.a_get_users({'q': f'{idp.value}_id:{idp_user_id}'})
         if not users:
