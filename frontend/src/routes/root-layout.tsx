@@ -30,6 +30,7 @@ import { LOCAL_STORAGE_KEYS } from "#/utils/local-storage";
 import { EmailVerificationGuard } from "#/components/features/guards/email-verification-guard";
 import { OnboardingGuard } from "#/components/features/guards/onboarding-guard";
 import { AlertBanner } from "#/components/features/alerts/alert-banner";
+import { AppStatusChrome } from "#/components/features/billing/app-status-chrome";
 import { cn } from "#/utils/utils";
 import { LoadingSpinner } from "#/components/shared/loading-spinner";
 import { useAppTitle } from "#/hooks/use-app-title";
@@ -37,10 +38,12 @@ import { useAutoAcceptInvitation } from "#/hooks/use-auto-accept-invitation";
 import { usePostHogIdentify } from "#/hooks/use-posthog-identify";
 import { SuperAdminSetupFloatingWidget } from "#/components/features/super-admin/super-admin-setup-guide";
 import { SuspendedOrganizationModal } from "#/components/features/org/suspended-organization-modal";
+import { useMe } from "#/hooks/query/use-me";
 import { useSelectedOrganizationStore } from "#/stores/selected-organization-store";
 import { useSuspendedOrganizationStore } from "#/stores/suspended-organization-store";
 import { useInvitationEmailMismatchStore } from "#/stores/invitation-email-mismatch-store";
 import { InvitationEmailMismatchModal } from "#/components/features/org/invitation-email-mismatch-modal";
+import { isInstanceSuperAdmin } from "#/utils/org/permissions";
 
 export function ErrorBoundary() {
   const error = useRouteError();
@@ -91,6 +94,7 @@ export default function MainApp() {
   const { t } = useTranslation();
 
   const config = useConfig();
+  const { data: me } = useMe();
   const {
     data: isAuthed,
     isLoading: isAuthLoading,
@@ -327,6 +331,13 @@ export default function MainApp() {
   const isFlushChromeRoute =
     pathname.startsWith("/settings") || pathname.startsWith("/super-admin");
 
+  // The status bar sits outside the scrolling column so it stays pinned
+  // while the page underneath scrolls. Hidden on login, TOS, and install.
+  const showStatusBanner =
+    Boolean(isAuthed) &&
+    config.data?.app_mode === "saas" &&
+    !isOnIntermediatePage;
+
   return (
     <div
       data-testid="root-layout"
@@ -337,7 +348,11 @@ export default function MainApp() {
     >
       <title>{appTitle}</title>
 
-      <div className="flex flex-col w-full min-w-0 h-full gap-3">
+      {showStatusBanner && (
+        <AppStatusChrome isSuperAdmin={isInstanceSuperAdmin(me?.permissions)} />
+      )}
+
+      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col gap-3">
         {config.data &&
           (config.data.maintenance_start_time ||
             (config.data.faulty_models &&
