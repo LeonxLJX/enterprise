@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -47,6 +48,10 @@ from storage.user_store import UserStore
 
 # HTTP timeout for external OAuth/token endpoint calls.
 OAUTH_HTTP_TIMEOUT = 15.0
+
+# Binds a link flow's state to the browser that started it.
+LINK_NONCE_COOKIE = 'openhands_oauth_link_nonce'
+LINK_STATE_TTL_SECONDS = 600
 
 oauth_v2_router = APIRouter(prefix='/oauth', tags=['OAuth v2'])
 
@@ -77,6 +82,7 @@ class OAuthState(BaseModel):
     # linking. Absent on login flows.
     user_id: str | None = None
     nonce: str = ''
+    issued_at: float = 0.0
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -487,6 +493,9 @@ async def oauth_v2_callback(
             detail='Invalid or tampered OAuth state',
         ) from exc
 
+    if state_data.mode == 'link':
+        link_user_id = _verify_link_state(request, state_data)
+
     web_url = get_web_url(request)
     redirect_uri = f'{web_url}/oauth/{provider_id}/callback'
 
@@ -496,12 +505,7 @@ async def oauth_v2_callback(
     )
 
     if state_data.mode == 'link':
-        if not state_data.user_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Link flow missing user_id in state',
-            )
-        user_id = state_data.user_id
+        user_id = link_user_id
         # Best-effort userinfo for the external subject link.
         try:
             userinfo = await _fetch_userinfo(provider, access_token)
@@ -563,7 +567,45 @@ async def oauth_v2_callback(
         )
     else:
         response = RedirectResponse(redirect_url, status_code=302)
+        response.delete_cookie(
+            LINK_NONCE_COOKIE,
+            path='/oauth',
+            secure=web_url.startswith('https'),
+            httponly=True,
+            samesite='lax',
+        )
     return response
+
+
+def _verify_link_state(request: Request, state: OAuthState) -> str:
+    """Return the user to link, if this browser started the link flow.
+
+    The state alone names the user, so without this an attacker could send
+    their own ``start_url`` to a victim and capture the victim's provider
+    identity and tokens. The session cookie can't be checked instead: it is
+    ``SameSite=strict`` in production, so the provider's redirect lacks it.
+    """
+    if not state.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Link flow missing user_id in state',
+        )
+    cookie_nonce = request.cookies.get(LINK_NONCE_COOKIE)
+    if not (
+        state.nonce
+        and cookie_nonce
+        and secrets.compare_digest(cookie_nonce, state.nonce)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Link flow was not started by this browser',
+        )
+    if time.time() - state.issued_at > LINK_STATE_TTL_SECONDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Link flow expired; start it again',
+        )
+    return state.user_id
 
 
 @oauth_v2_router.post('/{provider_id}/link')
@@ -575,7 +617,8 @@ async def oauth_v2_link(
     """Link a git provider to the signed-in user.
 
     Returns a JSON body with a ``start_url``: the provider's authorization
-    URL, carrying an encrypted link-mode state bound to ``user_id``. The
+    URL, carrying an encrypted link-mode state bound to ``user_id``. It also
+    sets a nonce cookie that the callback matches against the state. The
     frontend navigates the browser to it; the callback completes the link.
     """
     if not user_id:
@@ -589,16 +632,30 @@ async def oauth_v2_link(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='Cannot link an IDP provider; use login instead',
         )
+    web_url = get_web_url(request)
     link_state = OAuthState(
-        redirect_url=f'{get_web_url(request)}/settings/integrations',
+        redirect_url=f'{web_url}/settings/integrations',
         mode='link',
         user_id=user_id,
-        nonce=str(time.time()),
+        nonce=secrets.token_urlsafe(32),
+        issued_at=time.time(),
     )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status.HTTP_200_OK,
         content={'start_url': _authorization_url(request, provider, link_state)},
     )
+    # ``lax``, unlike the session cookie, so the provider's top-level
+    # redirect back to the callback carries it.
+    response.set_cookie(
+        key=LINK_NONCE_COOKIE,
+        value=link_state.nonce,
+        max_age=LINK_STATE_TTL_SECONDS,
+        path='/oauth',
+        secure=web_url.startswith('https'),
+        httponly=True,
+        samesite='lax',
+    )
+    return response
 
 
 @oauth_v2_router.delete('/{provider_id}', status_code=status.HTTP_204_NO_CONTENT)

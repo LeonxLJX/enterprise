@@ -10,6 +10,7 @@ import { QUERY_KEYS } from "#/hooks/query/query-keys";
 import * as ToastHandlers from "#/utils/custom-toast-handlers";
 import OAuthService from "#/api/oauth-service/oauth-service.api";
 import type { OAuthProviderSummary } from "#/api/oauth-service/oauth.types";
+import { I18nKey } from "#/i18n/declaration";
 
 const defaultFeatureFlags = createMockWebClientConfig().feature_flags;
 
@@ -203,7 +204,11 @@ describe("GitProviderConnection", () => {
     await userEvent.click(screen.getByTestId("connect-github-button"));
 
     // Assert
-    await waitFor(() => expect(errorToastSpy).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(errorToastSpy).toHaveBeenCalledWith(
+        I18nKey.SETTINGS$GIT_PROVIDER_NOT_CONFIGURED,
+      ),
+    );
     expect(startLinkSpy).not.toHaveBeenCalled();
     expect(window.location.href).toBe(
       "https://app.example.com/settings/integrations",
