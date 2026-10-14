@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, cast
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import APIRouter, HTTPException, Query
@@ -14,6 +17,9 @@ from pydantic import BaseModel
 import openhands
 from openhands.app_server.app_conversation.skill_loader import (
     _match_url_source_to_provider,
+    explicit_source_provider,
+    get_azure_devops_bearer_token,
+    provider_handler_with_token,
 )
 from openhands.app_server.app_conversation.skill_loader import (
     parse_marketplace_source as _parse_marketplace_source,
@@ -22,6 +28,7 @@ from openhands.app_server.config import depends_user_context
 from openhands.app_server.integrations.provider import (
     PROVIDER_TOKEN_TYPE,
     ProviderHandler,
+    ProviderType,
 )
 from openhands.app_server.settings.settings_models import MarketplaceRegistration
 from openhands.app_server.user.user_context import UserContext
@@ -35,6 +42,9 @@ user_context_dependency = depends_user_context()
 # skills/ is at the repo root, two levels above the openhands package __file__
 GLOBAL_SKILLS_DIR = Path(openhands.__file__).parent.parent / 'skills'
 USER_SKILLS_DIR = Path.home() / '.openhands' / 'microagents'
+
+# Same rule as the SDK's cached clones: only a full SHA needs full history.
+_FULL_SHA_RE = re.compile(r'^[0-9a-f]{40}$')
 
 
 class SkillInfo(BaseModel):
@@ -268,6 +278,30 @@ async def search_skills(
     return SkillPage(items=page, next_page_id=next_page_id)
 
 
+def _bearer_auth_git_env(
+    clone_url: str, bearer_token: str | None
+) -> dict[str, str] | None:
+    """Return a git environment sending ``bearer_token`` to the clone host.
+
+    Uses GIT_CONFIG_* so the token stays out of argv, the URL and any
+    persisted git config. ``None`` keeps the inherited environment.
+    """
+    if not bearer_token:
+        return None
+    parsed = urlparse(clone_url)
+    origin = f'{parsed.scheme}://{parsed.hostname}'
+    if parsed.port:
+        origin += f':{parsed.port}'
+    # Append after any GIT_CONFIG_* entries the server already inherits.
+    n = int(os.environ.get('GIT_CONFIG_COUNT') or 0)
+    return {
+        **os.environ,
+        'GIT_CONFIG_COUNT': str(n + 1),
+        f'GIT_CONFIG_KEY_{n}': f'http.{origin}/.extraheader',
+        f'GIT_CONFIG_VALUE_{n}': f'Authorization: Bearer {bearer_token}',
+    }
+
+
 async def _clone_marketplace_repo(
     marketplace: MarketplaceRegistration,
     user_context: UserContext,
@@ -291,6 +325,7 @@ async def _clone_marketplace_repo(
     # (pinned), so private self-hosted repos (e.g. Bitbucket DC) clone with
     # credentials. Non-URL owner/repo sources fall through to the public path.
     authenticated_url = None
+    bearer_token = None
     try:
         matched = await _match_url_source_to_provider(marketplace.source, user_context)
         if matched is not None:
@@ -299,8 +334,25 @@ async def _clone_marketplace_repo(
             authenticated_url = await handler.get_authenticated_git_url(
                 matched_repo, specified_provider=matched_provider
             )
+            # Entra tokens are not embedded in the URL; send them as a header.
+            if matched_provider == ProviderType.AZURE_DEVOPS:
+                bearer_token = await get_azure_devops_bearer_token(user_context)
+        elif (
+            named_provider := explicit_source_provider(marketplace.source)
+        ) is not None:
+            # github:owner/repo or a public provider URL: resolve only against
+            # that provider; without its token, clone the public source.
+            named_handler = await provider_handler_with_token(
+                user_context, named_provider
+            )
+            if named_handler is not None:
+                authenticated_url = await named_handler.get_authenticated_git_url(
+                    repo_path, specified_provider=named_provider
+                )
+                if named_provider == ProviderType.AZURE_DEVOPS:
+                    bearer_token = await get_azure_devops_bearer_token(user_context)
         elif '://' not in repo_path:
-            # Bare owner/repo (or recognized public domain): resolve normally.
+            # Bare owner/repo: resolve against every provider.
             provider_tokens = await user_context.get_provider_tokens()
             if provider_tokens:
                 typed_provider_tokens = cast(PROVIDER_TOKEN_TYPE, provider_tokens)
@@ -350,24 +402,33 @@ async def _clone_marketplace_repo(
             _cleanup_clone_dir(clone_dir)
             return None, f'Invalid clone URL: {clone_url}'
 
+        ref = marketplace.ref
+        if ref and ref.startswith('-'):
+            _cleanup_clone_dir(clone_dir)
+            return None, f'Invalid ref: {ref}'
+        # Clone like the agent-server does: shallow for a branch or tag, full
+        # history only when a commit SHA must be checked out.
+        pinned_sha = ref if ref and _FULL_SHA_RE.fullmatch(ref) else None
+        clone_args = ['git', 'clone']
+        if not pinned_sha:
+            clone_args += ['--depth', '1']
+            if ref:
+                clone_args += ['--branch', ref]
         result = subprocess.run(
-            ['git', 'clone', '--', clone_url, str(clone_dir)],
+            [*clone_args, '--', clone_url, str(clone_dir)],
             capture_output=True,
             text=True,
             timeout=120,
+            env=_bearer_auth_git_env(clone_url, bearer_token),
         )
 
         if result.returncode != 0:
             _cleanup_clone_dir(clone_dir)
             return None, f'Git clone failed: {result.stderr}'
 
-        # Checkout ref if specified
-        if marketplace.ref:
-            if marketplace.ref.startswith('-'):
-                _cleanup_clone_dir(clone_dir)
-                return None, f'Invalid ref: {marketplace.ref}'
+        if pinned_sha:
             checkout_result = subprocess.run(
-                ['git', '-C', str(clone_dir), 'checkout', marketplace.ref],
+                ['git', '-C', str(clone_dir), 'checkout', pinned_sha],
                 capture_output=True,
                 text=True,
                 timeout=60,
