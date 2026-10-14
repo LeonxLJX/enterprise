@@ -1,7 +1,7 @@
 """GitLab resolver on installs without Keycloak (integrated IDP, OAuth v2).
 
 The user linked GitLab through ``/oauth/{provider_id}/link``, so the GitLab
-user id lives in ``oauth_provider_users`` and the token in ``oauth_tokens``.
+user id lives in ``auth_provider_users`` and the token in ``oauth_tokens``.
 Keycloak is unconfigured; any call to it fails the test.
 """
 
@@ -25,7 +25,7 @@ from server.auth.saas_user_auth import SaasUserAuth
 from server.auth.token_manager import TokenManager
 from storage.auth_provider import AuthProvider
 from storage.auth_provider_details import OAuthProviderDetails
-from storage.oauth_provider_user_store import OAuthProviderUserStore
+from storage.auth_provider_user_store import AuthProviderUserStore
 from storage.oauth_token_store import OAuthTokenStore
 
 GITLAB_USER_ID = 4242
@@ -43,7 +43,7 @@ def no_keycloak(async_session_maker):
     )
     patches = [
         patch('storage.auth_provider_store.a_session_maker', async_session_maker),
-        patch('storage.oauth_provider_user_store.a_session_maker', async_session_maker),
+        patch('storage.auth_provider_user_store.a_session_maker', async_session_maker),
         patch('storage.oauth_token_store.a_session_maker', async_session_maker),
         patch('storage.offline_token_store.a_session_maker', async_session_maker),
         patch('storage.database.a_session_maker', async_session_maker),
@@ -84,7 +84,7 @@ async def gitlab_provider(no_keycloak, async_session_maker) -> AuthProvider:
 @pytest.fixture
 async def linked_user_id(gitlab_provider, create_user) -> str:
     user_id = create_user().id
-    await OAuthProviderUserStore().link(
+    await AuthProviderUserStore().link(
         oauth_provider_id=gitlab_provider.id,
         user_id=user_id,
         external_subject_id=str(GITLAB_USER_ID),

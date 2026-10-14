@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -35,7 +35,7 @@ from openhands.app_server.user_auth import get_user_auth, get_user_id
 from openhands.app_server.utils.encryption_key import EncryptionKey
 from server.auth.saas_user_auth import SaasUserAuth
 from server.routes import oauth_v2
-from storage.auth_provider_details import OAuthProviderDetails
+from storage.auth_provider_details import OAuthProviderDetails, SamlProviderDetails
 
 
 def _make_jwt_service() -> JwtService:
@@ -91,6 +91,16 @@ def _fake_provider(
         scopes=['repo'],
         permitted_drift_seconds=60,
     )
+    return provider
+
+
+def _fake_saml_provider(*, provider_id: int = 5):
+    provider = MagicMock()
+    provider.id = provider_id
+    provider.kind = SamlProviderDetails.__name__
+    provider.title = 'Acme SSO'
+    provider.is_idp = True
+    provider.details = SamlProviderDetails()
     return provider
 
 
@@ -160,6 +170,45 @@ def test_login_unknown_provider_404(client, jwt_svc):
         ),
     ):
         response = client.get('/oauth/9999/login', follow_redirects=False)
+    assert response.status_code == 404
+
+
+def test_login_saml_provider_redirects_to_saml_router(client, jwt_svc):
+    provider = _fake_saml_provider()
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
+        response = client.get(
+            '/oauth/5/login',
+            params={'redirect_url': '/dashboard'},
+            follow_redirects=False,
+        )
+    assert response.status_code == 302
+    location = response.headers['location']
+    assert '/saml/5/login' in location
+    assert 'redirect_url=%2Fdashboard' in location
+
+
+def test_callback_saml_provider_404(client, jwt_svc):
+    provider = _fake_saml_provider()
+    with (
+        patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc),
+        patch.object(
+            oauth_v2.AuthProviderStore,
+            'get_by_id',
+            new=AsyncMock(return_value=provider),
+        ),
+    ):
+        response = client.get(
+            '/oauth/5/callback',
+            params={'code': 'c', 'state': 's'},
+            follow_redirects=False,
+        )
     assert response.status_code == 404
 
 
@@ -310,12 +359,12 @@ def test_callback_login_persists_tokens_and_sets_cookie(client, jwt_svc):
         ),
         _patch_httpx(token_response, userinfo),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'get',
             new=AsyncMock(return_value=None),
         ),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'link',
             new=AsyncMock(),
         ),
@@ -323,7 +372,7 @@ def test_callback_login_persists_tokens_and_sets_cookie(client, jwt_svc):
             oauth_v2.UserStore,
             'create_user',
             new=AsyncMock(return_value=fake_user),
-        ),
+        ) as create_user,
         patch.object(
             oauth_v2.UserStore,
             'get_user_by_id',
@@ -352,6 +401,12 @@ def test_callback_login_persists_tokens_and_sets_cookie(client, jwt_svc):
 
     assert response.status_code == 302
     assert response.headers['location'] == '/done'
+    # 'ext-sub-1' is not a UUID -- the external sub must never be passed
+    # through as the internal User.id (UserStore.create_user requires a
+    # real UUID and derives Org.id from it).
+    created_user_id = create_user.await_args.args[0]
+    UUID(created_user_id)
+    assert created_user_id != 'ext-sub-1'
     # Cookie set on login flow.
     assert 'openhands_auth' in response.cookies
     # Token pair persisted.
@@ -386,12 +441,12 @@ def test_callback_login_redirects_to_tos_when_not_accepted(client, jwt_svc):
         ),
         _patch_httpx(token_response, userinfo),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'get',
             new=AsyncMock(return_value=None),
         ),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'link',
             new=AsyncMock(),
         ),
@@ -455,12 +510,12 @@ def test_callback_login_refuses_a_disabled_user(client, jwt_svc):
         ),
         _patch_httpx(token_response, userinfo),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'get',
             new=AsyncMock(return_value=None),
         ),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'link',
             new=AsyncMock(),
         ),
@@ -529,7 +584,7 @@ def test_callback_link_flow_with_matching_nonce_cookie(client, jwt_svc):
         ),
         _patch_httpx(token_response, userinfo),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'link',
             new=AsyncMock(),
         ) as link,
@@ -582,7 +637,7 @@ def test_callback_link_rejects_state_not_bound_to_this_browser(
             new=AsyncMock(return_value=provider),
         ),
         patch.object(oauth_v2, '_exchange_code', new=AsyncMock()) as exchange,
-        patch.object(oauth_v2.OAuthProviderUserStore, 'link', new=AsyncMock()) as link,
+        patch.object(oauth_v2.AuthProviderUserStore, 'link', new=AsyncMock()) as link,
         patch.object(
             oauth_v2.OAuthTokenStore, 'store_tokens', new=AsyncMock()
         ) as store_tokens,
@@ -650,7 +705,7 @@ def test_callback_link_schedules_gitlab_repo_sync(
             new=AsyncMock(return_value=provider),
         ),
         _patch_httpx({'access_token': 'at', 'refresh_token': 'rt'}, {'id': 42}),
-        patch.object(oauth_v2.OAuthProviderUserStore, 'link', new=AsyncMock()),
+        patch.object(oauth_v2.AuthProviderUserStore, 'link', new=AsyncMock()),
         patch.object(oauth_v2.OAuthTokenStore, 'store_tokens', new=AsyncMock()),
         patch.object(oauth_v2, 'schedule_gitlab_repo_sync') as schedule_sync,
     ):
@@ -826,7 +881,7 @@ def test_link_start_url_completes_in_the_browser_that_started_it(app, client, jw
             new=AsyncMock(return_value=provider),
         ),
         _patch_httpx({'access_token': 'at', 'refresh_token': 'rt'}, {'id': 42}),
-        patch.object(oauth_v2.OAuthProviderUserStore, 'link', new=AsyncMock()) as link,
+        patch.object(oauth_v2.AuthProviderUserStore, 'link', new=AsyncMock()) as link,
         patch.object(oauth_v2.OAuthTokenStore, 'store_tokens', new=AsyncMock()),
     ):
         _override_user_context(app, user_id)
@@ -885,12 +940,12 @@ def test_unlink_git_provider(app, client, jwt_svc):
             new=AsyncMock(return_value=provider),
         ),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'get_by_user',
             new=AsyncMock(return_value=link_row),
         ),
         patch.object(
-            oauth_v2.OAuthProviderUserStore,
+            oauth_v2.AuthProviderUserStore,
             'unlink',
             new=AsyncMock(),
         ) as unlink,

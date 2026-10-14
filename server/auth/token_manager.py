@@ -58,10 +58,10 @@ from server.auth.oauth_v2_refresh import (
 )
 from server.logger import logger
 from storage.auth_provider_store import AuthProviderStore
+from storage.auth_provider_user_store import AuthProviderUserStore
 from storage.auth_token_store import AuthTokenStore
 from storage.database import a_session_maker
 from storage.github_app_installation import GithubAppInstallation
-from storage.oauth_provider_user_store import OAuthProviderUserStore
 from storage.oauth_token_store import OAuthTokenStore
 from storage.offline_token_store import OfflineTokenStore
 
@@ -668,7 +668,7 @@ class TokenManager:
     ) -> str | None:
         provider = await AuthProviderStore().get_git_provider(idp)
         if provider is not None:
-            link = await OAuthProviderUserStore().get(provider.id, str(idp_user_id))
+            link = await AuthProviderUserStore().get(provider.id, str(idp_user_id))
             if link is not None:
                 return str(link.user_id)
 
