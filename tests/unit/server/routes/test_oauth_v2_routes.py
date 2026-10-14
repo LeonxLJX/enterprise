@@ -31,10 +31,11 @@ from pydantic import SecretStr
 
 from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.services.jwt_service import JwtService
-from openhands.app_server.user_auth import get_user_id
+from openhands.app_server.user_auth import get_user_auth, get_user_id
 from openhands.app_server.utils.encryption_key import EncryptionKey
+from server.auth.saas_user_auth import SaasUserAuth
 from server.routes import oauth_v2
-from storage.auth_provider_details import OAuthProviderDetails, PasswordProviderDetails
+from storage.auth_provider_details import OAuthProviderDetails
 
 
 def _make_jwt_service() -> JwtService:
@@ -667,23 +668,62 @@ def test_callback_link_schedules_gitlab_repo_sync(
         schedule_sync.assert_not_called()
 
 
-def test_list_providers_includes_provider_type(client):
-    git = _fake_provider(provider_id=1, category='gitlab')
-    password = MagicMock(id=2, kind=PasswordProviderDetails.__name__, title='Password')
-    password.is_idp = True
-    password.details = PasswordProviderDetails()
+def _override_session(app, user_id, *, oauth_v2_cookie: bool):
+    _override_user_context(app, user_id)
+    app.dependency_overrides[get_user_auth] = lambda: SaasUserAuth(
+        user_id=str(user_id),
+        refresh_token=SecretStr('' if oauth_v2_cookie else 'kc-refresh'),
+        oauth_v2_cookie=oauth_v2_cookie,
+    )
+
+
+def test_link_flow_requires_auth(app, client):
+    _override_user_context(app, None)
+    app.dependency_overrides[get_user_auth] = lambda: None
+    response = client.get('/oauth/link-flow', params={'provider': 'gitlab'})
+    assert response.status_code == 401
+
+
+def test_link_flow_is_keycloak_for_a_legacy_keycloak_session(app, client):
+    """A legacy session reads git tokens from Keycloak, so it must link there
+    even when the provider also has an OAuth v2 row."""
+    _override_session(app, uuid4(), oauth_v2_cookie=False)
     with patch.object(
         oauth_v2.AuthProviderStore,
-        'list_all',
-        new=AsyncMock(return_value=[git, password]),
+        'get_git_provider',
+        new=AsyncMock(return_value=_fake_provider(provider_id=7, category='gitlab')),
     ):
-        response = client.get('/oauth/providers')
+        response = client.get('/oauth/link-flow', params={'provider': 'gitlab'})
 
     assert response.status_code == 200
-    by_id = {p['id']: p for p in response.json()['providers']}
-    assert by_id[1]['provider_type'] == 'gitlab'
-    assert by_id[1]['is_idp'] is False
-    assert by_id[2]['provider_type'] is None
+    assert response.json() == {'flow': 'keycloak', 'provider_id': None}
+
+
+def test_link_flow_is_oauth_v2_for_an_oauth_v2_session(app, client):
+    _override_session(app, uuid4(), oauth_v2_cookie=True)
+    with patch.object(
+        oauth_v2.AuthProviderStore,
+        'get_git_provider',
+        new=AsyncMock(return_value=_fake_provider(provider_id=7, category='gitlab')),
+    ) as get_git_provider:
+        response = client.get('/oauth/link-flow', params={'provider': 'gitlab'})
+
+    assert response.status_code == 200
+    assert response.json() == {'flow': 'oauth_v2', 'provider_id': 7}
+    get_git_provider.assert_awaited_once_with(ProviderType.GITLAB)
+
+
+def test_link_flow_has_no_provider_when_it_is_not_configured(app, client):
+    _override_session(app, uuid4(), oauth_v2_cookie=True)
+    with patch.object(
+        oauth_v2.AuthProviderStore,
+        'get_git_provider',
+        new=AsyncMock(return_value=None),
+    ):
+        response = client.get('/oauth/link-flow', params={'provider': 'gitlab'})
+
+    assert response.status_code == 200
+    assert response.json() == {'flow': 'oauth_v2', 'provider_id': None}
 
 
 def test_callback_link_missing_user_id_in_state_400(client, jwt_svc):

@@ -24,7 +24,7 @@ interface GitProviderConnectionProps {
 /**
  * Connect / Disconnect controls for a git provider linked to the user's
  * account (SaaS). Connect starts the Keycloak account-linking flow (or the
- * OAuth v2 link flow on installs without Keycloak) and
+ * OAuth v2 link flow for OAuth v2 sessions) and
  * Disconnect unlinks the provider after confirmation. Children render only
  * while connected (e.g. configure links) and sit beside the Disconnect button.
  * The connection status itself is shown by the surrounding provider card.
@@ -43,14 +43,14 @@ export function GitProviderConnection({
     useStartGitProviderLink();
   const [confirmDisconnect, setConfirmDisconnect] = React.useState(false);
 
-  // These sessions have no Keycloak account to link to, and read git
-  // tokens only from what the OAuth v2 link stores.
-  const usesOAuthV2 =
+  // Only these installs have OAuth v2 sessions, which must link through
+  // OAuth v2; the backend tells them apart from legacy Keycloak sessions.
+  const mayHaveOAuthV2Sessions =
     !!config?.feature_flags?.enable_integrated_idp ||
     !!config?.feature_flags?.enable_oauth_v2_login;
 
   const handleConnect = () => {
-    if (usesOAuthV2) {
+    if (mayHaveOAuthV2Sessions) {
       startGitProviderLink(provider, {
         onError: (error) => {
           const errorMessage = retrieveAxiosErrorMessage(error);

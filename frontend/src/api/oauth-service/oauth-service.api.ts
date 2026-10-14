@@ -1,14 +1,16 @@
 import { openHands } from "../open-hands-axios";
-import type { OAuthProviderSummary } from "./oauth.types";
+import { Provider } from "#/types/settings";
+import type { GitProviderLinkFlow } from "./oauth.types";
 
 /** The OAuth v2 routes (``server/routes/oauth_v2.py``), used where there
  * is no Keycloak, e.g. installs on the integrated IDP. */
 const OAuthService = {
-  listProviders: async (): Promise<OAuthProviderSummary[]> => {
-    const { data } = await openHands.get<{
-      providers: OAuthProviderSummary[];
-    }>("/oauth/providers");
-    return data.providers;
+  getLinkFlow: async (provider: Provider): Promise<GitProviderLinkFlow> => {
+    const { data } = await openHands.get<GitProviderLinkFlow>(
+      "/oauth/link-flow",
+      { params: { provider } },
+    );
+    return data;
   },
 
   /** Returns the URL that starts linking ``providerId`` to the signed-in
