@@ -29,6 +29,7 @@ interface ProfilesBodyProps {
   isActivating: boolean;
   canManage?: boolean;
   canActivate?: boolean;
+  showOrgManagedBadges?: boolean;
 }
 
 interface ProfileGroup {
@@ -94,6 +95,7 @@ export function ProfilesBody({
   isActivating,
   canManage = true,
   canActivate = true,
+  showOrgManagedBadges = false,
 }: ProfilesBodyProps) {
   const { t } = useTranslation();
 
@@ -109,6 +111,7 @@ export function ProfilesBody({
       isActivating={isActivating}
       canManage={canManage}
       canActivate={canActivate}
+      showOrgManagedBadge={showOrgManagedBadges}
     />
   );
 

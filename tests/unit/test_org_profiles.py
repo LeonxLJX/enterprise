@@ -1808,3 +1808,33 @@ async def test_extend_active_badge_tracks_personal_then_org_selection(
     assert member.llm_profiles['active'] is None
     listing = await list_profiles(org_id=org_id, user_id=user_id)
     assert listing.active_profile == 'org-option'
+
+
+@pytest.mark.asyncio
+async def test_locked_member_can_select_org_profile(
+    async_session_maker, patch_route_db
+):
+    org_id = patch_route_db
+    user_id = str(ADMIN_USER_ID)
+    await save_profile(
+        org_id=org_id,
+        name='org-option',
+        request=SaveProfileRequest(llm=StrictLLM(model='openai/gpt-4o')),
+        user_id=user_id,
+    )
+
+    async with async_session_maker() as session:
+        org = (
+            (await session.execute(select(Org).where(Org.id == org_id))).scalars().one()
+        )
+        org.configuration_policy = {'llm': {'operation': 'locked'}}
+        await session.commit()
+
+    await select_profile_for_member(
+        org_id=org_id,
+        name='org-option',
+        user_id=user_id,
+    )
+
+    member = await _read_member(async_session_maker, org_id, ADMIN_USER_ID)
+    assert member.active_llm_profile_name == 'org-option'
