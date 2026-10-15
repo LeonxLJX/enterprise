@@ -39,13 +39,19 @@ vi.mock("./llm-settings", () => ({
   LlmSettingsScreen: ({
     scope,
     canActivateOrgProfiles = false,
+    showOrgManagedBadges = false,
+    showReadOnlyProviderConnections = false,
   }: {
     scope: string;
     canActivateOrgProfiles?: boolean;
+    showOrgManagedBadges?: boolean;
+    showReadOnlyProviderConnections?: boolean;
   }) => (
     <div
       data-testid={`llm-settings-${scope}`}
       data-can-activate={String(canActivateOrgProfiles)}
+      data-org-managed-badges={String(showOrgManagedBadges)}
+      data-read-only-connections={String(showReadOnlyProviderConnections)}
     />
   ),
 }));
@@ -99,8 +105,21 @@ describe("OrgDefaultLlmSettingsScreen", () => {
     });
   });
 
+  it("renders the managed organization experience for locked members", () => {
+    mockState.operation = "locked";
+    renderScreen();
+
+    expect(screen.getByTestId("locked-member-notice")).toHaveTextContent(
+      "SETTINGS$LOCKED_LLM_NOTICE",
+    );
+    expect(orgSettings()).toHaveAttribute("data-can-activate", "true");
+    expect(orgSettings()).toHaveAttribute("data-org-managed-badges", "true");
+    expect(orgSettings()).toHaveAttribute("data-read-only-connections", "true");
+    expect(personalSettings()).not.toBeInTheDocument();
+  });
+
   it.each([
-    ["locked", true, false, "false"],
+    ["locked", true, false, "true"],
     ["subset", true, false, "true"],
     ["replace", false, true, null],
     ["extend", true, true, "true"],

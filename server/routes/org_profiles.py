@@ -559,7 +559,7 @@ async def select_profile_for_member(
     name: str = Path(..., min_length=1),
     user_id: str = Depends(require_permission(Permission.VIEW_ORG_SETTINGS)),
 ) -> ActivateProfileResponse:
-    """Select an org profile for one member under subset/extend policy."""
+    """Select an org profile for one member under locked/subset/extend policy."""
     async with _org_profiles_transaction(org_id, user_id) as (
         session,
         org,
@@ -567,6 +567,7 @@ async def select_profile_for_member(
     ):
         operation = load_configuration_policy(org.configuration_policy).llm.operation
         if operation not in {
+            ConfigurationOperation.LOCKED,
             ConfigurationOperation.SUBSET,
             ConfigurationOperation.EXTEND,
         }:

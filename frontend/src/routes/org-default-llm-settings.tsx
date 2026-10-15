@@ -8,6 +8,7 @@ import { I18nKey } from "#/i18n/declaration";
 import { ConfigurationOperation } from "#/types/settings";
 import { createPermissionGuard } from "#/utils/org/permission-guard";
 import { cn } from "#/utils/utils";
+import InfoCircleIcon from "#/icons/info-circle.svg?react";
 import {
   displayErrorToast,
   displaySuccessToast,
@@ -24,7 +25,8 @@ const operations: Array<{
   {
     value: "locked",
     label: "Locked",
-    description: "Members can only use the organization default.",
+    description:
+      "Members can choose organization-managed profiles but cannot add their own.",
   },
   {
     value: "replace",
@@ -121,6 +123,28 @@ function TabButton({
   );
 }
 
+function LockedMemberNotice() {
+  const { t } = useTranslation();
+
+  return (
+    <div
+      data-testid="locked-member-notice"
+      role="note"
+      className="flex items-start gap-4 rounded-xl border border-blue-400/60 bg-blue-500/10 px-5 py-5 text-blue-200"
+    >
+      <InfoCircleIcon
+        width={24}
+        height={24}
+        className="mt-0.5 shrink-0 text-blue-300"
+        aria-hidden="true"
+      />
+      <p className="text-sm leading-6 !text-[#b8d7ff] sm:text-base">
+        {t(I18nKey.SETTINGS$LOCKED_LLM_NOTICE)}
+      </p>
+    </div>
+  );
+}
+
 function OrgDefaultLlmSettingsScreen() {
   const { t } = useTranslation();
   const { data: me } = useMe();
@@ -159,7 +183,17 @@ function OrgDefaultLlmSettingsScreen() {
       </div>
     );
   } else if (operation === "locked") {
-    content = <LlmSettingsScreen scope="org" />;
+    content = (
+      <div className="flex flex-col gap-8">
+        <LockedMemberNotice />
+        <LlmSettingsScreen
+          scope="org"
+          canActivateOrgProfiles
+          showOrgManagedBadges
+          showReadOnlyProviderConnections
+        />
+      </div>
+    );
   } else if (operation === "subset") {
     content = <LlmSettingsScreen scope="org" canActivateOrgProfiles />;
   } else if (operation === "extend") {

@@ -26,6 +26,7 @@ interface OrgLlmProfilesManagerProps {
    * members and managed installs never see it.
    */
   showProviderConnections?: boolean;
+  showOrgManagedBadges?: boolean;
   onAddProfile?: () => void;
   onEditProfile?: (profile: LlmProfileSummary) => void;
 }
@@ -35,6 +36,7 @@ export function OrgLlmProfilesManager({
   canManage = true,
   canActivate = canManage,
   showProviderConnections = false,
+  showOrgManagedBadges = false,
   onAddProfile,
   onEditProfile,
 }: OrgLlmProfilesManagerProps) {
@@ -110,11 +112,16 @@ export function OrgLlmProfilesManager({
           isActivating={activationMutation.isPending}
           canManage={canManage}
           canActivate={canActivate}
+          showOrgManagedBadges={showOrgManagedBadges}
         />
       </div>
 
       {showProviderConnections ? (
-        <ProviderConnectionsManager orgId={orgId} profiles={profiles} />
+        <ProviderConnectionsManager
+          orgId={orgId}
+          profiles={profiles}
+          canManage={canManage}
+        />
       ) : null}
 
       <OrgRenameProfileModal
