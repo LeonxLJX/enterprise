@@ -185,13 +185,19 @@ async def search_repositories(
             app_mode=get_global_config().app_mode,
             selected_provider=provider,
             page=page,
-            per_page=limit + 1,
+            per_page=limit,
             installation_id=installation_id,
         )
 
     next_page_id = None
-    if len(repos) > limit:
-        repos = repos[:-1]
+    if query:
+        if len(repos) > limit:
+            repos = repos[:-1]
+            next_page_id = encode_page_id(page + 1)
+    elif len(repos) >= limit:
+        # Providers page by (page, per_page), so per_page must equal the page
+        # size; a full page may be followed by an empty one.
+        repos = repos[:limit]
         next_page_id = encode_page_id(page + 1)
 
     return RepositoryPage(items=repos, next_page_id=next_page_id)
