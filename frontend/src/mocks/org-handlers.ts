@@ -6,6 +6,7 @@ import {
   OrganizationUserRole,
   UpdateOrganizationMemberParams,
 } from "#/types/org";
+import { ConfigurationOperation } from "#/types/settings";
 import { requestWantsFreshSa } from "./mock-fresh-sa";
 import {
   findMockAdminUser,
@@ -439,6 +440,11 @@ const createDefaultOrgProfiles = (): MockOrgProfilesState => ({
   ]),
   active: "default",
 });
+
+const orgConfigurationOperations = new Map<string, ConfigurationOperation>();
+
+const getOrgConfigurationOperation = (orgId: string) =>
+  orgConfigurationOperations.get(orgId) ?? "extend";
 
 const orgProfilesByOrgId = new Map<string, MockOrgProfilesState>();
 
@@ -1030,6 +1036,9 @@ export const ORG_HANDLERS = [
     return HttpResponse.json({
       agent_settings: org.agent_settings ?? {},
       conversation_settings: {},
+      configuration_policy: {
+        llm: { operation: getOrgConfigurationOperation(orgId) },
+      },
       search_api_key: org.search_api_key,
       llm_api_key_set: true,
     });
@@ -1063,10 +1072,25 @@ export const ORG_HANDLERS = [
         orgs.set(orgId, org);
       }
 
+      const operation = (
+        body.configuration_policy as
+          | { llm?: { operation?: ConfigurationOperation } }
+          | undefined
+      )?.llm?.operation;
+      if (
+        operation &&
+        ["locked", "replace", "subset", "extend"].includes(operation)
+      ) {
+        orgConfigurationOperations.set(orgId, operation);
+      }
+
       return HttpResponse.json({
         agent_settings: org.agent_settings ?? {},
         conversation_settings:
           (body.conversation_settings as Record<string, unknown>) ?? {},
+        configuration_policy: {
+          llm: { operation: getOrgConfigurationOperation(orgId) },
+        },
         search_api_key: org.search_api_key,
         llm_api_key_set: true,
       });
@@ -1754,6 +1778,23 @@ export const ORG_HANDLERS = [
       return new HttpResponse(null, { status: 204 });
     },
   ),
+
+  http.post("/api/organizations/:orgId/profiles/:name/select", ({ params }) => {
+    const orgId = params.orgId?.toString();
+    const name = decodeURIComponent(params.name?.toString() ?? "");
+    if (!orgId || !orgs.has(orgId)) {
+      return HttpResponse.json(
+        { error: "Organization not found" },
+        { status: 404 },
+      );
+    }
+    const state = getOrgProfiles(orgId);
+    if (!state.profiles.has(name)) {
+      return HttpResponse.json({ error: "Profile not found" }, { status: 404 });
+    }
+    state.active = name;
+    return new HttpResponse(null, { status: 204 });
+  }),
 
   http.post(
     "/api/organizations/:orgId/profiles/:name/rename",
