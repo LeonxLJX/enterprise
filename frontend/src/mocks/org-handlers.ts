@@ -488,9 +488,51 @@ const createDefaultOrgProfiles = (): MockOrgProfilesState => ({
 });
 
 const orgConfigurationOperations = new Map<string, ConfigurationOperation>();
+const MOCK_CONFIGURATION_OPERATIONS_KEY =
+  "openhands_mock_configuration_operations";
 
-const getOrgConfigurationOperation = (orgId: string) =>
-  orgConfigurationOperations.get(orgId) ?? "extend";
+const isConfigurationOperation = (
+  operation: unknown,
+): operation is ConfigurationOperation =>
+  typeof operation === "string" &&
+  ["locked", "replace", "subset", "extend"].includes(operation);
+
+function getStoredConfigurationOperations() {
+  try {
+    const stored = localStorage.getItem(MOCK_CONFIGURATION_OPERATIONS_KEY);
+    return stored
+      ? (JSON.parse(stored) as Record<string, ConfigurationOperation>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+const getOrgConfigurationOperation = (orgId: string) => {
+  const storedOperation = getStoredConfigurationOperations()[orgId];
+  if (isConfigurationOperation(storedOperation)) {
+    orgConfigurationOperations.set(orgId, storedOperation);
+  }
+  return orgConfigurationOperations.get(orgId) ?? "extend";
+};
+
+const setOrgConfigurationOperation = (
+  orgId: string,
+  operation: ConfigurationOperation,
+) => {
+  orgConfigurationOperations.set(orgId, operation);
+  try {
+    localStorage.setItem(
+      MOCK_CONFIGURATION_OPERATIONS_KEY,
+      JSON.stringify({
+        ...getStoredConfigurationOperations(),
+        [orgId]: operation,
+      }),
+    );
+  } catch {
+    // Keep the in-memory policy when browser storage is unavailable.
+  }
+};
 
 const orgProfilesByOrgId = new Map<string, MockOrgProfilesState>();
 
@@ -1127,11 +1169,8 @@ export const ORG_HANDLERS = [
           | { llm?: { operation?: ConfigurationOperation } }
           | undefined
       )?.llm?.operation;
-      if (
-        operation &&
-        ["locked", "replace", "subset", "extend"].includes(operation)
-      ) {
-        orgConfigurationOperations.set(orgId, operation);
+      if (isConfigurationOperation(operation)) {
+        setOrgConfigurationOperation(orgId, operation);
       }
 
       return HttpResponse.json({
