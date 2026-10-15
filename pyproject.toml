@@ -218,3 +218,8 @@ omit = [ "tests/*", "**/test_*" ]
 package = false
 exclude-newer = "7 days"
 exclude-newer-package = { openhands-agent-server = false, openhands-sdk = false, openhands-tools = false, litellm = false, procrastinate = "2026-09-24T00:00:00Z" }
+
+[tool.uv.sources]
+openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk", subdirectory = "openhands-agent-server", rev = "818c161b534477849716d445b2927b433f9dd9ab" }
+openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk", subdirectory = "openhands-sdk", rev = "818c161b534477849716d445b2927b433f9dd9ab" }
+openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk", subdirectory = "openhands-tools", rev = "818c161b534477849716d445b2927b433f9dd9ab" }
