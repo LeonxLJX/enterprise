@@ -53,10 +53,10 @@ assumption about the temporary directory. This includes a regression verifying t
 503, rather than a user configuration 422. The subsequent rebase brings in only
 the Enterprise 1.71.0 release metadata; application behavior is unchanged.
 
-The PostgreSQL suite executes a real Alembic 186→187 upgrade with encrypted
+The PostgreSQL suite executes a real Alembic 188→189 upgrade with encrypted
 profile envelopes. Only known legacy empty tool lists change; current empty
 selections, future/invalid records, ids and the active pointer survive. Migration
-integrity reports one linear head at 187. Audit tests cover invalid schema
+integrity reports one linear head at 189. Audit tests cover invalid schema
 markers without mutating their input.
 
 Frontend lint, staged type checking and production build pass; the affected
