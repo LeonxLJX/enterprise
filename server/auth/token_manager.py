@@ -3,7 +3,6 @@ import base64
 import json
 import time
 from urllib.parse import parse_qs
-from uuid import UUID
 
 import httpx
 import jwt
@@ -52,17 +51,13 @@ from server.auth.email_validation import (
     matches_base_email,
 )
 from server.auth.keycloak_manager import get_keycloak_admin, get_keycloak_openid
-from server.auth.oauth_v2_refresh import (
-    get_permitted_drift_seconds,
-    make_refresh_callback,
-)
+from server.auth.oauth_v2_refresh import get_oauth_v2_git_token
 from server.logger import logger
 from storage.auth_provider_store import AuthProviderStore
 from storage.auth_provider_user_store import AuthProviderUserStore
 from storage.auth_token_store import AuthTokenStore
 from storage.database import a_session_maker
 from storage.github_app_installation import GithubAppInstallation
-from storage.oauth_token_store import OAuthTokenStore
 from storage.offline_token_store import OfflineTokenStore
 
 
@@ -649,16 +644,9 @@ class TokenManager:
         Keycloak, so it works on installs using the integrated IDP.
         """
         if oauth_v2:
-            provider = await AuthProviderStore().get_git_provider(idp)
-            if provider is not None:
-                token = await OAuthTokenStore(
-                    user_id=UUID(user_id), oauth_provider_id=provider.id
-                ).get_valid_access_token(
-                    permitted_drift_seconds=get_permitted_drift_seconds(provider),
-                    refresh=make_refresh_callback(provider),
-                )
-                if token:
-                    return token
+            token = await get_oauth_v2_git_token(user_id, idp)
+            if token:
+                return token
 
         offline_token = await self.load_offline_token(user_id=user_id)
         if not offline_token:
