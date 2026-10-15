@@ -20,6 +20,7 @@ interface ProfileRowProps {
   onDelete: (profile: LlmProfileSummary) => void;
   isActivating: boolean;
   canManage?: boolean;
+  canActivate?: boolean;
 }
 
 export function ProfileRow({
@@ -31,6 +32,7 @@ export function ProfileRow({
   onDelete,
   isActivating,
   canManage = true,
+  canActivate = true,
 }: ProfileRowProps) {
   const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -71,7 +73,7 @@ export function ProfileRow({
           </Typography.Text>
         ) : null}
       </div>
-      {canManage ? (
+      {canManage || canActivate ? (
         <div className="relative shrink-0">
           <button
             ref={triggerRef}
@@ -92,6 +94,8 @@ export function ProfileRow({
               onDelete={() => onDelete(profile)}
               isActive={isActive}
               isActivating={isActivating}
+              canManage={canManage}
+              canActivate={canActivate}
               onClose={() => setMenuOpen(false)}
             />
           )}

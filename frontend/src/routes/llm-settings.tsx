@@ -127,8 +127,10 @@ type ProfileFormMode = "create" | "edit";
 
 export function LlmSettingsScreen({
   scope = "personal",
+  canActivateOrgProfiles = false,
 }: {
   scope?: SettingsScope;
+  canActivateOrgProfiles?: boolean;
 }) {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -895,6 +897,7 @@ export function LlmSettingsScreen({
         <OrgLlmProfilesManager
           orgId={organizationId}
           canManage={canManageProfilesForScope}
+          canActivate={canManageProfilesForScope || canActivateOrgProfiles}
           showProviderConnections={showProviderConnection}
           onAddProfile={
             canManageProfilesForScope ? () => openForm(null) : undefined

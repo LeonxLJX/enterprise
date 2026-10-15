@@ -8,7 +8,10 @@ import { ProviderConnectionsManager } from "#/components/features/settings/provi
 import { LlmProfileSummary } from "#/api/settings-service/profiles-service.api";
 import { useOrgLlmProfiles } from "#/hooks/query/use-org-llm-profiles";
 import { useProviderConnections } from "#/hooks/query/use-provider-connections";
-import { useActivateOrgLlmProfile } from "#/hooks/mutation/use-org-llm-profile-mutations";
+import {
+  useActivateOrgLlmProfile,
+  useSelectOrgLlmProfile,
+} from "#/hooks/mutation/use-org-llm-profile-mutations";
 import { mutateWithToast } from "#/utils/mutate-with-toast";
 import { extractErrorMessage } from "#/utils/extract-error-message";
 import { I18nKey } from "#/i18n/declaration";
@@ -16,6 +19,7 @@ import { I18nKey } from "#/i18n/declaration";
 interface OrgLlmProfilesManagerProps {
   orgId: string;
   canManage?: boolean;
+  canActivate?: boolean;
   /**
    * Render the shared provider-connections section below the profiles. The
    * caller decides (admin permission + BYOK allowed); off by default so
@@ -29,6 +33,7 @@ interface OrgLlmProfilesManagerProps {
 export function OrgLlmProfilesManager({
   orgId,
   canManage = true,
+  canActivate = canManage,
   showProviderConnections = false,
   onAddProfile,
   onEditProfile,
@@ -36,6 +41,8 @@ export function OrgLlmProfilesManager({
   const { t } = useTranslation();
   const { data, isLoading, error } = useOrgLlmProfiles(orgId);
   const activateProfile = useActivateOrgLlmProfile(orgId);
+  const selectProfile = useSelectOrgLlmProfile(orgId);
+  const activationMutation = canManage ? activateProfile : selectProfile;
   // Connection display names drive the profile grouping. Fetched for every
   // member regardless of `showProviderConnections` (the list route only needs
   // VIEW_ORG_SETTINGS), so profiles stay grouped for members who can't manage
@@ -60,7 +67,7 @@ export function OrgLlmProfilesManager({
   );
 
   const handleActivate = async (name: string) => {
-    await mutateWithToast(activateProfile, name, {
+    await mutateWithToast(activationMutation, name, {
       success: t(I18nKey.SETTINGS$PROFILE_ACTIVATED, { name }),
       error: (err) => extractErrorMessage(err, t(I18nKey.ERROR$GENERIC)),
     }).catch(() => null);
@@ -100,8 +107,9 @@ export function OrgLlmProfilesManager({
           onEdit={handleEdit}
           onRename={setProfileToRename}
           onDelete={setProfileToDelete}
-          isActivating={activateProfile.isPending}
+          isActivating={activationMutation.isPending}
           canManage={canManage}
+          canActivate={canActivate}
         />
       </div>
 
