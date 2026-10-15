@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -16,6 +16,9 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from storage.database import a_session_maker
 from storage.gitlab_webhook_store import GitlabWebhookStore
 
+if TYPE_CHECKING:
+    from integrations.gitlab.gitlab_service import SaaSGitLabService
+
 CHUNK_SIZE = 100
 # Twice the job's 300 s deadline, so a claim is only taken over from a run that
 # has been stopped.
@@ -23,6 +26,13 @@ CLAIM_LEASE = timedelta(minutes=10)
 
 
 class VerifyWebhookStatus:
+    async def gitlab_service_for(self, user_id: str) -> SaaSGitLabService | None:
+        """The service acting as ``user_id``; ``None`` skips their row this run."""
+        # GitLabServiceImpl returns SaaSGitLabService in enterprise context
+        from integrations.gitlab.gitlab_service import SaaSGitLabService
+
+        return cast(SaaSGitLabService, GitLabServiceImpl(external_auth_id=user_id))
+
     async def install_webhooks(self):
         """
         Claim rows that need a hook installed or reinstalled, and process them.
@@ -79,13 +89,9 @@ class VerifyWebhookStatus:
                     webhook
                 )
 
-                # GitLabServiceImpl returns SaaSGitLabService in enterprise context
-                from integrations.gitlab.gitlab_service import SaaSGitLabService
-
-                gitlab_service = cast(
-                    SaaSGitLabService,
-                    GitLabServiceImpl(external_auth_id=webhook.user_id),
-                )
+                gitlab_service = await self.gitlab_service_for(webhook.user_id)
+                if gitlab_service is None:
+                    continue
 
                 await install_claimed_webhook(
                     gitlab_service=gitlab_service,
