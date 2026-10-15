@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import cast
 
 from jinja2 import Environment, FileSystemLoader
 from pydantic import SecretStr
@@ -24,7 +23,6 @@ from integrations.utils import (
     get_session_expired_message,
 )
 from integrations.v1_utils import get_saas_user_auth
-from openhands.app_server.integrations.gitlab.gitlab_service import GitLabServiceImpl
 from openhands.app_server.integrations.provider import ProviderToken, ProviderType
 from openhands.app_server.secrets.secrets_models import Secrets
 from openhands.app_server.types import (
@@ -64,17 +62,16 @@ class GitlabManager(Manager[GitlabViewType]):
         """
 
         keycloak_user_id = await self.token_manager.get_user_id_from_idp_user_id(
-            user_id, ProviderType.GITLAB
+            user_id, ProviderType.GITLAB, oauth_v2=True
         )
         if keycloak_user_id is None:
             logger.warning(f'Got invalid keyloak user id for GitLab User {user_id}')
             return False
 
-        # GitLabServiceImpl returns SaaSGitLabService in enterprise context
         from integrations.gitlab.gitlab_service import SaaSGitLabService
 
-        gitlab_service = cast(
-            SaaSGitLabService, GitLabServiceImpl(external_auth_id=keycloak_user_id)
+        gitlab_service = SaaSGitLabService(
+            external_auth_id=keycloak_user_id, oauth_v2=True
         )
 
         return await gitlab_service.user_has_write_access(project_id)
@@ -132,11 +129,10 @@ class GitlabManager(Manager[GitlabViewType]):
         """
         keycloak_user_id = gitlab_view.user_info.keycloak_user_id
 
-        # GitLabServiceImpl returns SaaSGitLabService in enterprise context
         from integrations.gitlab.gitlab_service import SaaSGitLabService
 
-        gitlab_service = cast(
-            SaaSGitLabService, GitLabServiceImpl(external_auth_id=keycloak_user_id)
+        gitlab_service = SaaSGitLabService(
+            external_auth_id=keycloak_user_id, oauth_v2=True
         )
 
         if isinstance(gitlab_view, GitlabInlineMRComment) or isinstance(
@@ -183,7 +179,7 @@ class GitlabManager(Manager[GitlabViewType]):
                 )
 
                 user_token = await self.token_manager.get_idp_token_from_idp_user_id(
-                    str(user_info.user_id), ProviderType.GITLAB
+                    str(user_info.user_id), ProviderType.GITLAB, oauth_v2=True
                 )
 
                 if not user_token:
@@ -210,7 +206,9 @@ class GitlabManager(Manager[GitlabViewType]):
                 conversation_id = await gitlab_view.initialize_new_conversation()
 
                 saas_user_auth = await get_saas_user_auth(
-                    gitlab_view.user_info.keycloak_user_id, self.token_manager
+                    gitlab_view.user_info.keycloak_user_id,
+                    self.token_manager,
+                    oauth_v2=True,
                 )
 
                 await gitlab_view.create_new_conversation(

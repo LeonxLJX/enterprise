@@ -718,7 +718,7 @@ def test_callback_link_schedules_gitlab_repo_sync(
 
     assert response.status_code == 302
     if expect_sync:
-        schedule_sync.assert_called_once_with(str(user_id))
+        schedule_sync.assert_called_once_with(str(user_id), oauth_v2=True)
     else:
         schedule_sync.assert_not_called()
 

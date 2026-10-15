@@ -619,15 +619,19 @@ class TokenManager:
         before_sleep=_before_sleep_callback,
     )
     async def get_idp_token_from_idp_user_id(
-        self, idp_user_id: str, idp: ProviderType
+        self, idp_user_id: str, idp: ProviderType, *, oauth_v2: bool = False
     ) -> str | None:
         logger.info(f'Getting IDP token from IDP user_id: {idp_user_id}')
-        user_id = await self.get_user_id_from_idp_user_id(idp_user_id, idp)
+        user_id = await self.get_user_id_from_idp_user_id(
+            idp_user_id, idp, oauth_v2=oauth_v2
+        )
         if not user_id:
             return None
 
         try:
-            return await self.get_git_provider_token_for_user(user_id, idp)
+            return await self.get_git_provider_token_for_user(
+                user_id, idp, oauth_v2=oauth_v2
+            )
         except KeycloakConnectionError:
             logger.exception(
                 f'KeycloakConnectionError when getting IDP token for IDP user_id {idp_user_id}',
@@ -636,48 +640,56 @@ class TokenManager:
             raise
 
     async def get_git_provider_token_for_user(
-        self, user_id: str, idp: ProviderType
+        self, user_id: str, idp: ProviderType, *, oauth_v2: bool = False
     ) -> str | None:
         """Return ``user_id``'s access token at git provider ``idp``.
 
-        A token linked through OAuth v2 (``oauth_tokens``) is preferred: it
-        needs no Keycloak, so it works on installs using the integrated IDP.
-        Otherwise falls back to the legacy Keycloak offline session.
+        Reads the Keycloak offline session. With ``oauth_v2``, a token linked
+        through OAuth v2 (``oauth_tokens``) is tried first: it needs no
+        Keycloak, so it works on installs using the integrated IDP.
         """
-        provider = await AuthProviderStore().get_git_provider(idp)
-        if provider is not None:
-            token = await OAuthTokenStore(
-                user_id=UUID(user_id), oauth_provider_id=provider.id
-            ).get_valid_access_token(
-                permitted_drift_seconds=get_permitted_drift_seconds(provider),
-                refresh=make_refresh_callback(provider),
-            )
-            if token:
-                return token
+        if oauth_v2:
+            provider = await AuthProviderStore().get_git_provider(idp)
+            if provider is not None:
+                token = await OAuthTokenStore(
+                    user_id=UUID(user_id), oauth_provider_id=provider.id
+                ).get_valid_access_token(
+                    permitted_drift_seconds=get_permitted_drift_seconds(provider),
+                    refresh=make_refresh_callback(provider),
+                )
+                if token:
+                    return token
 
         offline_token = await self.load_offline_token(user_id=user_id)
         if not offline_token:
-            logger.warning(f'No {idp.value} token found for user_id: {user_id}')
+            logger.warning(f'No offline token found for user_id: {user_id}')
             return None
         return await self.get_idp_token_from_offline_token(
             offline_token=offline_token, idp=idp
         )
 
     async def get_user_id_from_idp_user_id(
-        self, idp_user_id: str, idp: ProviderType
+        self, idp_user_id: str, idp: ProviderType, *, oauth_v2: bool = False
     ) -> str | None:
-        provider = await AuthProviderStore().get_git_provider(idp)
-        if provider is not None:
-            link = await AuthProviderUserStore().get(provider.id, str(idp_user_id))
-            if link is not None:
-                return str(link.user_id)
+        """Look up the user Keycloak links to ``idp_user_id``.
 
-        if not KEYCLOAK_SERVER_URL:
-            logger.info(
-                f'{idp.value} user with IDP ID {idp_user_id} has no linked '
-                'account and Keycloak is not configured.'
-            )
-            return None
+        With ``oauth_v2``, an account linked through OAuth v2
+        (``auth_provider_users``) is tried first, and Keycloak is skipped when
+        it is not configured.
+        """
+        if oauth_v2:
+            provider = await AuthProviderStore().get_git_provider(idp)
+            if provider is not None:
+                link = await AuthProviderUserStore().get(provider.id, str(idp_user_id))
+                if link is not None:
+                    return str(link.user_id)
+
+            if not KEYCLOAK_SERVER_URL:
+                logger.info(
+                    f'{idp.value} user with IDP ID {idp_user_id} has no linked '
+                    'account and Keycloak is not configured.'
+                )
+                return None
 
         keycloak_admin = get_keycloak_admin(self.external)
         users = await keycloak_admin.a_get_users({'q': f'{idp.value}_id:{idp_user_id}'})

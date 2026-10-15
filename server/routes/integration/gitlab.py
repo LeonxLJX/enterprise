@@ -16,7 +16,6 @@ from integrations.gitlab.webhook_installation import (
 from integrations.models import Message, SourceType
 from integrations.types import GitLabResourceType
 from integrations.utils import GITLAB_WEBHOOK_URL, IS_LOCAL_DEPLOYMENT
-from openhands.app_server.integrations.gitlab.gitlab_service import GitLabServiceImpl
 from openhands.app_server.user_auth import get_user_id
 from openhands.app_server.utils.logger import openhands_logger as logger
 from server.auth.token_manager import TokenManager
@@ -142,13 +141,7 @@ async def get_gitlab_resources(
     """
     try:
         # Get GitLab service for the user
-        gitlab_service = GitLabServiceImpl(external_auth_id=user_id)
-
-        if not isinstance(gitlab_service, SaaSGitLabService):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Only SaaS GitLab service is supported',
-            )
+        gitlab_service = SaaSGitLabService(external_auth_id=user_id, oauth_v2=True)
 
         # Fetch projects and groups with admin access
         projects, groups = await gitlab_service.get_user_resources_with_admin_access()
@@ -280,13 +273,7 @@ async def reinstall_gitlab_webhook(
     """
     try:
         # Get GitLab service for the user
-        gitlab_service = GitLabServiceImpl(external_auth_id=user_id)
-
-        if not isinstance(gitlab_service, SaaSGitLabService):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Only SaaS GitLab service is supported',
-            )
+        gitlab_service = SaaSGitLabService(external_auth_id=user_id, oauth_v2=True)
 
         resource_id = body.resource.id
         resource_type = body.resource.type

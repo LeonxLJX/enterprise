@@ -2,7 +2,8 @@
 
 The user linked GitLab through ``/oauth/{provider_id}/link``, so the GitLab
 user id lives in ``auth_provider_users`` and the token in ``oauth_tokens``.
-Keycloak is unconfigured; any call to it fails the test.
+Keycloak is unconfigured; any call to it fails the test. Those lookups are
+opt-in (``oauth_v2=True``); without it, Keycloak stays the only source.
 """
 
 from __future__ import annotations
@@ -126,7 +127,7 @@ def _labeled_issue_message() -> Message:
 @pytest.mark.asyncio
 async def test_resolves_gitlab_user_from_oauth_v2_link(linked_user_id):
     user_id = await TokenManager().get_user_id_from_idp_user_id(
-        GITLAB_USER_ID, ProviderType.GITLAB
+        GITLAB_USER_ID, ProviderType.GITLAB, oauth_v2=True
     )
     assert user_id == linked_user_id
 
@@ -134,7 +135,7 @@ async def test_resolves_gitlab_user_from_oauth_v2_link(linked_user_id):
 @pytest.mark.asyncio
 async def test_unlinked_gitlab_user_is_none_without_keycloak(linked_user_id):
     user_id = await TokenManager().get_user_id_from_idp_user_id(
-        999, ProviderType.GITLAB
+        999, ProviderType.GITLAB, oauth_v2=True
     )
     assert user_id is None
 
@@ -148,7 +149,7 @@ async def test_unlinked_gitlab_user_falls_back_to_keycloak(linked_user_id):
         patch('server.auth.token_manager.get_keycloak_admin', return_value=admin),
     ):
         user_id = await TokenManager().get_user_id_from_idp_user_id(
-            999, ProviderType.GITLAB
+            999, ProviderType.GITLAB, oauth_v2=True
         )
 
     assert user_id == 'kc-user'
@@ -160,13 +161,13 @@ async def test_gitlab_link_does_not_answer_for_other_providers(linked_user_id):
     token_manager = TokenManager()
     assert (
         await token_manager.get_user_id_from_idp_user_id(
-            GITLAB_USER_ID, ProviderType.GITHUB
+            GITLAB_USER_ID, ProviderType.GITHUB, oauth_v2=True
         )
         is None
     )
     assert (
         await token_manager.get_git_provider_token_for_user(
-            linked_user_id, ProviderType.GITHUB
+            linked_user_id, ProviderType.GITHUB, oauth_v2=True
         )
         is None
     )
@@ -175,7 +176,7 @@ async def test_gitlab_link_does_not_answer_for_other_providers(linked_user_id):
 @pytest.mark.asyncio
 async def test_gitlab_token_from_idp_user_id(linked_user_id):
     token = await TokenManager().get_idp_token_from_idp_user_id(
-        str(GITLAB_USER_ID), ProviderType.GITLAB
+        str(GITLAB_USER_ID), ProviderType.GITLAB, oauth_v2=True
     )
     assert token == GITLAB_TOKEN
 
@@ -183,7 +184,7 @@ async def test_gitlab_token_from_idp_user_id(linked_user_id):
 @pytest.mark.asyncio
 async def test_gitlab_token_missing_for_user_without_link(gitlab_provider, create_user):
     token = await TokenManager().get_git_provider_token_for_user(
-        str(create_user().id), ProviderType.GITLAB
+        str(create_user().id), ProviderType.GITLAB, oauth_v2=True
     )
     assert token is None
 
@@ -202,7 +203,7 @@ async def test_keycloak_offline_token_used_when_no_oauth_v2_token(
         new=AsyncMock(return_value='glpat-from-keycloak'),
     ) as exchange:
         token = await token_manager.get_git_provider_token_for_user(
-            user_id, ProviderType.GITLAB
+            user_id, ProviderType.GITLAB, oauth_v2=True
         )
 
     assert token == 'glpat-from-keycloak'
@@ -232,7 +233,7 @@ async def test_expired_gitlab_token_is_refreshed(gitlab_provider, create_user):
     client.__aenter__.return_value = client
     with patch('server.auth.oauth_v2_refresh.httpx.AsyncClient', return_value=client):
         token = await TokenManager().get_git_provider_token_for_user(
-            str(user_id), ProviderType.GITLAB
+            str(user_id), ProviderType.GITLAB, oauth_v2=True
         )
 
     assert token == 'glpat-fresh'
@@ -241,7 +242,7 @@ async def test_expired_gitlab_token_is_refreshed(gitlab_provider, create_user):
 
 @pytest.mark.asyncio
 async def test_saas_gitlab_service_uses_oauth_v2_token(linked_user_id):
-    service = SaaSGitLabService(external_auth_id=linked_user_id)
+    service = SaaSGitLabService(external_auth_id=linked_user_id, oauth_v2=True)
     token = await service.get_latest_token()
     assert token is not None
     assert token.get_secret_value() == GITLAB_TOKEN
@@ -258,7 +259,7 @@ async def test_gitlab_view_carries_internal_user_id(linked_user_id):
 
 @pytest.mark.asyncio
 async def test_resolver_user_auth_reads_oauth_v2_git_tokens(linked_user_id):
-    user_auth = await get_saas_user_auth(linked_user_id, TokenManager())
+    user_auth = await get_saas_user_auth(linked_user_id, TokenManager(), oauth_v2=True)
     assert isinstance(user_auth, SaasUserAuth)
     assert user_auth.oauth_v2_cookie is True
 
@@ -274,14 +275,16 @@ async def test_resolver_user_auth_reads_oauth_v2_git_tokens(linked_user_id):
 
 @pytest.mark.asyncio
 async def test_background_repo_sync_runs_for_oauth_v2_gitlab_user(linked_user_id):
-    assert await _user_has_gitlab_provider(linked_user_id) is True
+    assert await _user_has_gitlab_provider(linked_user_id, oauth_v2=True) is True
 
 
 @pytest.mark.asyncio
 async def test_background_repo_sync_skips_user_without_gitlab(
     gitlab_provider, create_user
 ):
-    assert await _user_has_gitlab_provider(str(create_user().id)) is False
+    assert (
+        await _user_has_gitlab_provider(str(create_user().id), oauth_v2=True) is False
+    )
 
 
 @pytest.mark.asyncio
@@ -293,3 +296,60 @@ async def test_resolver_user_auth_keeps_legacy_path_without_oauth_v2_links(
     assert isinstance(user_auth, SaasUserAuth)
     assert user_auth.oauth_v2_cookie is False
     assert user_auth.user_id == user_id
+
+
+# Without ``oauth_v2`` every lookup keeps the Keycloak-only behavior, even for a
+# user who has an OAuth v2 link and token.
+
+
+@pytest.mark.asyncio
+async def test_user_lookup_uses_keycloak_by_default(linked_user_id):
+    admin = MagicMock()
+    admin.a_get_users = AsyncMock(return_value=[{'id': 'kc-user'}])
+    with patch('server.auth.token_manager.get_keycloak_admin', return_value=admin):
+        user_id = await TokenManager().get_user_id_from_idp_user_id(
+            GITLAB_USER_ID, ProviderType.GITLAB
+        )
+
+    assert user_id == 'kc-user'
+    admin.a_get_users.assert_awaited_once_with({'q': f'gitlab_id:{GITLAB_USER_ID}'})
+
+
+@pytest.mark.asyncio
+async def test_token_lookup_uses_keycloak_by_default(linked_user_id):
+    token_manager = TokenManager()
+    assert (
+        await token_manager.get_git_provider_token_for_user(
+            linked_user_id, ProviderType.GITLAB
+        )
+        is None
+    )
+
+    await token_manager.store_offline_token(linked_user_id, 'offline')
+    with patch.object(
+        TokenManager,
+        'get_idp_token_from_offline_token',
+        new=AsyncMock(return_value='glpat-from-keycloak'),
+    ):
+        token = await token_manager.get_git_provider_token_for_user(
+            linked_user_id, ProviderType.GITLAB
+        )
+    assert token == 'glpat-from-keycloak'
+
+
+@pytest.mark.asyncio
+async def test_saas_gitlab_service_uses_keycloak_by_default(linked_user_id):
+    service = SaaSGitLabService(external_auth_id=linked_user_id)
+    assert await service.get_latest_token() is None
+
+
+@pytest.mark.asyncio
+async def test_resolver_user_auth_uses_keycloak_by_default(linked_user_id):
+    user_auth = await get_saas_user_auth(linked_user_id, TokenManager())
+    assert isinstance(user_auth, SaasUserAuth)
+    assert user_auth.oauth_v2_cookie is False
+
+
+@pytest.mark.asyncio
+async def test_background_repo_sync_uses_keycloak_by_default(linked_user_id):
+    assert await _user_has_gitlab_provider(linked_user_id) is False

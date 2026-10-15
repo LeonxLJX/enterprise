@@ -27,7 +27,10 @@ class SaaSGitLabService(GitLabService):
         token: SecretStr | None = None,
         external_token_manager: bool = False,
         base_domain: str | None = None,
+        oauth_v2: bool = False,
     ):
+        """``oauth_v2`` also reads tokens linked through OAuth v2, before
+        Keycloak, for the ``external_auth_id`` and ``user_id`` lookups."""
         logger.info(
             f'SaaSGitLabService created with user_id {user_id}, external_auth_id {external_auth_id}, external_auth_token {"set" if external_auth_token else "None"}, gitlab_token {"set" if token else "None"}, external_token_manager {external_token_manager}'
         )
@@ -42,6 +45,7 @@ class SaaSGitLabService(GitLabService):
 
         self.external_auth_token = external_auth_token
         self.external_auth_id = external_auth_id
+        self.oauth_v2 = oauth_v2
         self.token_manager = TokenManager(external=external_token_manager)
 
     async def get_latest_token(self) -> SecretStr | None:
@@ -57,7 +61,7 @@ class SaaSGitLabService(GitLabService):
             )
         elif self.external_auth_id:
             gitlab_token_str = await self.token_manager.get_git_provider_token_for_user(
-                self.external_auth_id, ProviderType.GITLAB
+                self.external_auth_id, ProviderType.GITLAB, oauth_v2=self.oauth_v2
             )
             gitlab_token = SecretStr(gitlab_token_str) if gitlab_token_str else None
             logger.info(
@@ -65,7 +69,7 @@ class SaaSGitLabService(GitLabService):
             )
         elif self.user_id:
             gitlab_token_str = await self.token_manager.get_idp_token_from_idp_user_id(
-                self.user_id, ProviderType.GITLAB
+                self.user_id, ProviderType.GITLAB, oauth_v2=self.oauth_v2
             )
             gitlab_token = SecretStr(gitlab_token_str) if gitlab_token_str else None
             logger.debug(

@@ -248,7 +248,7 @@ class TestGitlabV1CallbackProcessor:
 
         # Verify GitLab service was called correctly for issue
         mock_saas_gitlab_service_cls.assert_called_once_with(
-            external_auth_id='test_keycloak_user'
+            external_auth_id='test_keycloak_user', oauth_v2=True
         )
         mock_gitlab_service.reply_to_issue.assert_called_once_with(
             '12345', '42', 'discussion_123', 'Test summary from agent'

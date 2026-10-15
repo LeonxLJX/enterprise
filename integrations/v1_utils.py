@@ -131,14 +131,16 @@ async def handle_callback_error(
 
 
 async def get_saas_user_auth(
-    keycloak_user_id: str, token_manager: TokenManager
+    keycloak_user_id: str, token_manager: TokenManager, *, oauth_v2: bool = False
 ) -> UserAuth:
     offline_token = await token_manager.load_offline_token(keycloak_user_id)
     if offline_token is None:
         logger.info('no_offline_token_found')
         # Users who signed in through OAuth v2 (e.g. the integrated IDP, with
         # no Keycloak) have their git tokens in ``oauth_tokens``.
-        if await AuthProviderUserStore().list_for_user(UUID(keycloak_user_id)):
+        if oauth_v2 and await AuthProviderUserStore().list_for_user(
+            UUID(keycloak_user_id)
+        ):
             return SaasUserAuth(
                 user_id=keycloak_user_id,
                 refresh_token=SecretStr(''),

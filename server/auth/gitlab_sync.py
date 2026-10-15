@@ -9,8 +9,9 @@ from openhands.app_server.types import AppMode
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 
-async def _user_has_gitlab_provider(user_id: str) -> bool:
-    """Check if the user has a GitLab token, from Keycloak or OAuth v2."""
+async def _user_has_gitlab_provider(user_id: str, oauth_v2: bool = False) -> bool:
+    """Check if the user has a GitLab token in Keycloak or, with ``oauth_v2``,
+    one linked through OAuth v2."""
     # Lazy import to avoid circular dependency issues at module load time
     from storage.auth_provider_store import AuthProviderStore
     from storage.auth_tokens import AuthTokens
@@ -27,6 +28,8 @@ async def _user_has_gitlab_provider(user_id: str) -> bool:
         if result.scalars().first() is not None:
             return True
 
+    if not oauth_v2:
+        return False
     provider = await AuthProviderStore().get_git_provider(ProviderType.GITLAB)
     if provider is None:
         return False
@@ -35,7 +38,10 @@ async def _user_has_gitlab_provider(user_id: str) -> bool:
 
 
 def schedule_gitlab_repo_sync(
-    user_id: str, keycloak_access_token: SecretStr | None = None
+    user_id: str,
+    keycloak_access_token: SecretStr | None = None,
+    *,
+    oauth_v2: bool = False,
 ) -> None:
     """Schedule a background sync of GitLab repositories and webhook tracking.
 
@@ -49,7 +55,7 @@ def schedule_gitlab_repo_sync(
     async def _run():
         try:
             # Check if the user has a GitLab provider token before syncing
-            if not await _user_has_gitlab_provider(user_id):
+            if not await _user_has_gitlab_provider(user_id, oauth_v2):
                 logger.debug(
                     'gitlab_repo_sync_skipped: user has no GitLab provider',
                     extra={'user_id': user_id},
@@ -63,7 +69,9 @@ def schedule_gitlab_repo_sync(
             from integrations.gitlab.gitlab_service import SaaSGitLabService
 
             service = SaaSGitLabService(
-                external_auth_id=user_id, external_auth_token=keycloak_access_token
+                external_auth_id=user_id,
+                external_auth_token=keycloak_access_token,
+                oauth_v2=oauth_v2,
             )
             await service.get_all_repositories(
                 'pushed', AppMode.SAAS, store_in_background=False

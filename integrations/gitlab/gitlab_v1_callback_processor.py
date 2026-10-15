@@ -115,7 +115,9 @@ class GitlabV1CallbackProcessor(EventCallbackProcessor):
         if not keycloak_user_id:
             raise RuntimeError('Missing keycloak user ID for GitLab')
 
-        gitlab_service = SaaSGitLabService(external_auth_id=keycloak_user_id)
+        gitlab_service = SaaSGitLabService(
+            external_auth_id=keycloak_user_id, oauth_v2=True
+        )
 
         project_id = self.gitlab_view_data['project_id']
         issue_number = self.gitlab_view_data['issue_number']

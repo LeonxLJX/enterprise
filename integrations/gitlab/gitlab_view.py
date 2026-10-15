@@ -19,7 +19,6 @@ from openhands.app_server.app_conversation.app_conversation_models import (
     ConversationTrigger,
 )
 from openhands.app_server.config import get_app_conversation_service
-from openhands.app_server.integrations.gitlab.gitlab_service import GitLabServiceImpl
 from openhands.app_server.integrations.provider import PROVIDER_TOKEN_TYPE, ProviderType
 from openhands.app_server.integrations.service_types import Comment
 from openhands.app_server.services.injector import InjectorState
@@ -61,8 +60,10 @@ class GitlabIssue(ResolverViewInterface):
         return getattr(self, 'branch_name', None)
 
     async def _load_resolver_context(self):
-        gitlab_service = GitLabServiceImpl(
-            external_auth_id=self.user_info.keycloak_user_id
+        from integrations.gitlab.gitlab_service import SaaSGitLabService
+
+        gitlab_service = SaaSGitLabService(
+            external_auth_id=self.user_info.keycloak_user_id, oauth_v2=True
         )
 
         self.previous_comments = await gitlab_service.get_issue_or_mr_comments(
@@ -264,8 +265,10 @@ class GitlabInlineMRComment(GitlabMRComment):
     line_number: int
 
     async def _load_resolver_context(self):
-        gitlab_service = GitLabServiceImpl(
-            external_auth_id=self.user_info.keycloak_user_id
+        from integrations.gitlab.gitlab_service import SaaSGitLabService
+
+        gitlab_service = SaaSGitLabService(
+            external_auth_id=self.user_info.keycloak_user_id, oauth_v2=True
         )
 
         (
@@ -390,7 +393,7 @@ class GitlabFactory:
         project_id = payload['object_attributes']['project_id']
 
         keycloak_user_id = await token_manager.get_user_id_from_idp_user_id(
-            user_id, ProviderType.GITLAB
+            user_id, ProviderType.GITLAB, oauth_v2=True
         )
         # TODO: When keycloak_user_id is None, perhaps this should raise unauthorized.
         user_info = UserData(

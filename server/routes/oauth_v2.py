@@ -446,7 +446,7 @@ async def oauth_v2_callback(
         isinstance(provider.details, OAuthProviderDetails)
         and provider.details.provider_type == ProviderType.GITLAB
     ):
-        schedule_gitlab_repo_sync(user_id)
+        schedule_gitlab_repo_sync(user_id, oauth_v2=True)
 
     redirect_url = state_data.redirect_url or '/'
 
