@@ -74,3 +74,6 @@ Exact parent MCP inheritance in SDK delegates and Canvas default-path/catalog
 migration remain in their upstream trackers. Planning and per-request raw
 system prompts retain the SDK-supported raw-agent path because SDK 1.54.0
 settings cannot represent those prompt presets.
+
+After SDK 1.55.0 was released, the pins moved to 1.55.0. The full unit suite
+passes on the released wheels: 7,643 passed.
