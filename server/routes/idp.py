@@ -102,6 +102,7 @@ from pydantic import BaseModel, EmailStr, field_validator
 from openhands.app_server.user_auth import get_user_id
 from openhands.app_server.utils.logger import openhands_logger as logger
 from server.auth.authorization import Permission, authorize_permission
+from server.auth.login_policy import require_native_login_allowed
 from server.auth.oauth_v2_refresh import (
     create_oauth_v2_cookie_payload,
     sign_oauth_v2_cookie,
@@ -491,6 +492,7 @@ def _render_invite_form(
 
 
 async def _require_idp_available() -> AuthProvider:
+    require_native_login_allowed()
     provider = await _get_integrated_idp_provider()
     if provider is None:
         raise HTTPException(
@@ -1341,6 +1343,7 @@ def _set_idp_cookie(
     """
     from server.auth.oauth_v2_refresh import COOKIE_MAX_AGE_CAP_SECONDS
 
+    require_native_login_allowed()
     max_age_seconds = COOKIE_MAX_AGE_CAP_SECONDS
     payload = create_oauth_v2_cookie_payload(
         user_id,
