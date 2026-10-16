@@ -137,7 +137,7 @@ export function LoginContent({
   const { t } = useTranslation();
   const { data: config } = useConfig();
   const { isEnterpriseCloud } = useAppMode();
-  const enforceSso = config?.feature_flags.enforce_enterprise_sso === true;
+  const enforceSso = config?.feature_flags?.enforce_enterprise_sso === true;
   const loginProviders = enforceSso ? ["enterprise_sso"] : providersConfigured;
 
   // reCAPTCHA - only need token generation, verification happens at backend callback

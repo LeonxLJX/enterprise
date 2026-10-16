@@ -394,6 +394,9 @@ class DefaultWebClientConfigInjector(WebClientConfigInjector):
                     'ENABLE_BILLING', self.feature_flags.enable_billing
                 ),
                 'enable_integrated_idp': await _resolve_enable_integrated_idp(),
+                # Deployment auth policy must survive structured feature flag
+                # configuration without replacing unrelated integration flags.
+                'enforce_enterprise_sso': _env_flag_enabled('ENFORCE_ENTERPRISE_SSO'),
                 'enable_litellm': enable_litellm,
                 # LiteLLM off means BYOK is the only LLM source; force it on
                 # regardless of OH_ALLOW_USER_LLM_CONFIGURATION.

@@ -16,8 +16,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
-from keycloak.exceptions import KeycloakConnectionError
-from pydantic import BaseModel, SecretStr
+from keycloak.exceptions import KeycloakAuthenticationError, KeycloakConnectionError
+from pydantic import BaseModel, SecretStr, ValidationError
 from sqlalchemy import select
 
 from openhands.analytics import get_analytics_service, resolve_analytics_context
@@ -822,6 +822,8 @@ async def keycloak_link_context(request: Request) -> KeycloakLinkContext:
         raise HTTPException(401, 'Keycloak authentication required')
     try:
         user_info = await token_manager.get_user_info(token.get_secret_value())
+    except (KeycloakAuthenticationError, ValidationError) as exc:
+        raise HTTPException(401, 'Keycloak authentication required') from exc
     except KeycloakConnectionError as exc:
         raise HTTPException(
             503, 'Authentication service temporarily unavailable'

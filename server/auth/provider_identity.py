@@ -217,10 +217,6 @@ def set_oauth_v2_cookie(
     the existing "no external token to refresh" case this was already built
     to handle.
     """
-    from server.auth.login_policy import require_native_login_allowed
-
-    require_native_login_allowed()
-
     from server.auth.oauth_v2_refresh import (
         compute_cookie_max_age,
         create_oauth_v2_cookie_payload,
