@@ -93,13 +93,25 @@ class OAuthState(BaseModel):
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
+def _require_oauth_provider(provider: AuthProvider) -> None:
+    """404 unless ``provider`` is generic OAuth2.
+
+    Fails closed for any provider kind without a dedicated branch before the
+    call, so a newly added kind can't fall through into the OAuth2 flow.
+    """
+    if not isinstance(provider.details, OAuthProviderDetails):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f'Provider {provider.id} does not support OAuth2 login',
+        )
+
+
 def _oauth_details(provider: AuthProvider) -> OAuthProviderDetails:
     """Narrow ``provider.details`` to ``OAuthProviderDetails``.
 
-    Every caller of this helper runs after the generic OAuth2 redirect/token
-    routes have already excluded non-OAuth2 rows (see the ``kind ==
-    PasswordProviderDetails.__name__`` checks in ``oauth_v2_login`` /
-    ``oauth_v2_callback``), so this should never actually mismatch -- the
+    Every caller of this helper runs after ``oauth_v2_login`` /
+    ``oauth_v2_callback`` have excluded non-OAuth2 rows (see
+    ``_require_oauth_provider``), so this should never actually mismatch -- the
     assertion documents that invariant instead of silently reaching into the
     wrong subclass's fields.
     """
@@ -382,6 +394,7 @@ async def oauth_v2_login(
             target = f'{target}?{urlencode(params)}'
         return RedirectResponse(target, status_code=302)
 
+    _require_oauth_provider(provider)
     details = _oauth_details(provider)
     auth_url = details.authorization_url
     if not auth_url:
@@ -429,21 +442,10 @@ async def oauth_v2_callback(
     """
     provider = await _get_provider(provider_id)
 
-    # Integrated IDP callbacks are handled by dedicated routes -- checked
+    # Password and SAML callbacks are handled by dedicated routes; checked
     # first, unconditionally, so this 404s on provider kind alone regardless
     # of whatever ``code``/``state`` a caller happens to send.
-    if provider.kind == PasswordProviderDetails.__name__:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail='Password login callback must use POST with email field',
-        )
-    # SAML's ACS is a POST (the IdP's auto-submitting form) handled by
-    # ``server.routes.saml``, never this GET callback.
-    if provider.kind == SamlProviderDetails.__name__:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail='SAML callback must use POST /saml/{provider_id}/acs',
-        )
+    _require_oauth_provider(provider)
 
     if error:
         raise HTTPException(
