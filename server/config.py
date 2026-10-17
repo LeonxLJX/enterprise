@@ -207,7 +207,7 @@ class SaaSServerConfig(ServerConfig):
 
         if self.auth_url:
             config['AUTH_URL'] = self.auth_url
-            if KEYCLOAK_REALM_NAME != 'allhands':
+            if KEYCLOAK_REALM_NAME and KEYCLOAK_REALM_NAME != 'allhands':
                 # Expose the selected realm to the frontend without changing
                 # AUTH_URL itself: migrations and internal callers use its host.
                 realm = quote(KEYCLOAK_REALM_NAME, safe='')

@@ -513,6 +513,7 @@ class TestDefaultLlmSettings:
     'realm,expected',
     [
         ('allhands', 'https://auth.example.com/auth/'),
+        ('', 'https://auth.example.com/auth/'),
         ('allhands-oidc', 'https://auth.example.com/auth/realms/allhands-oidc'),
         ('company realm', 'https://auth.example.com/auth/realms/company%20realm'),
     ],
