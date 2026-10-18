@@ -403,98 +403,61 @@ class TestSearchRepositories:
         assert call_kwargs.get('order') == 'desc'  # Default
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'provider',
+        [ProviderType.GITHUB, ProviderType.BITBUCKET, ProviderType.AZURE_DEVOPS],
+    )
+    @pytest.mark.parametrize('total', [5, 6])
     @patch('openhands.app_server.git.git_router.ProviderHandler')
-    async def test_pagination_works_across_pages(self, mock_handler_cls):
-        """Test that pagination works correctly across multiple pages.
-
-        Note: This endpoint uses page-based pagination (passing page number to provider),
-        not offset-based pagination like installations. The provider returns limit+1 items,
-        and we check if there are more to determine next_page_id.
+    async def test_pagination_returns_each_repository_once(
+        self, mock_handler_cls, total, provider
+    ):
+        """Providers page by (page, per_page), like the GitHub, Bitbucket and
+        Azure DevOps APIs; following next_page_id must list every repository once.
         """
         # Arrange
+        all_repos = [
+            Repository(
+                id=str(i),
+                full_name=f'owner/repo{i}',
+                git_provider=provider,
+                is_public=True,
+            )
+            for i in range(1, total + 1)
+        ]
+
+        def provider_page(**kwargs):
+            start = (kwargs['page'] - 1) * kwargs['per_page']
+            return all_repos[start : start + kwargs['per_page']]
+
         mock_handler = MagicMock()
-
-        # We'll set up the mock to return different data based on the page parameter
-        # First call (page=1): return 3 items (limit+1), meaning there's a next page
-        # Second call (page=2): return 3 items, meaning there's a next page
-        # Third call (page=3): return 2 items, meaning it's the last page
-        def mock_get_repositories(**kwargs):
-            page = kwargs.get('page', 1)
-            if page == 1:
-                return [
-                    Repository(
-                        id=str(i),
-                        full_name=f'user/repo{i}',
-                        git_provider=ProviderType.GITHUB,
-                        is_public=True,
-                    )
-                    for i in range(1, 4)  # 3 items = limit+1
-                ]
-            elif page == 2:
-                return [
-                    Repository(
-                        id=str(i),
-                        full_name=f'user/repo{i}',
-                        git_provider=ProviderType.GITHUB,
-                        is_public=True,
-                    )
-                    for i in range(4, 7)  # 3 items = limit+1
-                ]
-            else:
-                return [
-                    Repository(
-                        id=str(i),
-                        full_name=f'user/repo{i}',
-                        git_provider=ProviderType.GITHUB,
-                        is_public=True,
-                    )
-                    for i in range(7, 9)  # 2 items < limit+1 = last page
-                ]
-
-        mock_handler.get_repositories = AsyncMock(side_effect=mock_get_repositories)
+        mock_handler.get_repositories = AsyncMock(side_effect=provider_page)
         mock_handler_cls.return_value = mock_handler
-
         mock_context = _make_mock_user_context(
-            provider_tokens={
-                ProviderType.GITHUB: ProviderToken(user_id='user-123', token='token')
-            },
+            provider_tokens={provider: ProviderToken(user_id='user-123', token='t')},
             user_id='user-123',
         )
 
-        # Act - First page (page=1)
-        result_page1 = await search_repositories(
-            provider=ProviderType.GITHUB,
-            query=None,
-            installation_id=None,
-            page_id=None,  # This means page 1
-            limit=2,
-            sort_order=None,
-            user_context=mock_context,
-        )
+        # Act
+        seen: list[str] = []
+        page_id = None
+        for _ in range(10):
+            result = await search_repositories(
+                provider=provider,
+                query=None,
+                installation_id='installation',
+                page_id=page_id,
+                limit=2,
+                sort_order=None,
+                user_context=mock_context,
+            )
+            seen.extend(repo.id for repo in result.items)
+            page_id = result.next_page_id
+            if page_id is None:
+                break
 
-        # Assert - First page returns 2 items (truncated from limit+1=3), with next_page_id
-        assert len(result_page1.items) == 2
-        assert result_page1.items[0].id == '1'
-        assert result_page1.items[1].id == '2'
-        assert result_page1.next_page_id == encode_page_id(2)
-
-        # Act - Second page (page=2)
-        result_page2 = await search_repositories(
-            provider=ProviderType.GITHUB,
-            query=None,
-            installation_id=None,
-            page_id=encode_page_id(2),  # This means page 2
-            limit=2,
-            sort_order=None,
-            user_context=mock_context,
-        )
-
-        # Assert - Second page returns next 2 items
-        assert len(result_page2.items) == 2
-        assert result_page2.items[0].id == '4'
-        assert result_page2.items[1].id == '5'
-        # next_page_id = page + 1 = 2 + 1 = 3, encoded as base64 = 'Mw'
-        assert result_page2.next_page_id == encode_page_id(3)
+        # Assert
+        assert seen == [str(i) for i in range(1, total + 1)]
 
     @pytest.mark.asyncio
     @patch('openhands.app_server.git.git_router.ProviderHandler')
