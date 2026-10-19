@@ -6,6 +6,7 @@ that can be used by both the cron job and API routes.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -30,6 +31,10 @@ SCOPES: list[str] = [
     'pipeline_events',
 ]
 
+# A run refreshes a row's claim just before creating its hook, so the lease only
+# has to outlast one row's GitLab calls, not a whole run.
+CLAIM_LEASE = timedelta(minutes=10)
+
 
 class BreakLoopException(Exception):
     """Exception raised when webhook installation conditions are not met or rate limited."""
@@ -40,11 +45,9 @@ class BreakLoopException(Exception):
 async def _delete_row(
     webhook_store: GitlabWebhookStore,
     webhook: GitlabWebhook,
-    claim_run_id: UUID | None,
+    claim_run_id: UUID,
 ) -> None:
-    if claim_run_id is None:
-        await webhook_store.delete_webhook(webhook)
-    elif not await webhook_store.delete_claimed(webhook.id, claim_run_id):
+    if not await webhook_store.delete_claimed(webhook.id, claim_run_id):
         log_stale_write_rejected(webhook, claim_run_id)
 
 
@@ -52,11 +55,9 @@ async def _update_row(
     webhook_store: GitlabWebhookStore,
     webhook: GitlabWebhook,
     fields: dict[str, Any],
-    claim_run_id: UUID | None,
+    claim_run_id: UUID,
 ) -> None:
-    if claim_run_id is None:
-        await webhook_store.update_webhook(webhook, fields)
-    elif not await webhook_store.update_claimed(webhook.id, claim_run_id, **fields):
+    if not await webhook_store.update_claimed(webhook.id, claim_run_id, **fields):
         log_stale_write_rejected(webhook, claim_run_id)
         raise BreakLoopException()
 
@@ -74,7 +75,7 @@ async def verify_webhook_conditions(
     resource_id: str,
     webhook_store: GitlabWebhookStore,
     webhook: GitlabWebhook,
-    claim_run_id: UUID | None = None,
+    claim_run_id: UUID,
     check_existing: bool = True,
 ) -> None:
     """
@@ -172,68 +173,6 @@ async def verify_webhook_conditions(
 
     if does_webhook_exist_on_resource:
         raise BreakLoopException()
-
-
-async def install_webhook_on_resource(
-    gitlab_service: SaaSGitLabService,
-    resource_type: GitLabResourceType,
-    resource_id: str,
-    webhook_store: GitlabWebhookStore,
-    webhook: GitlabWebhook,
-) -> tuple[str | None, WebhookStatus | None]:
-    """
-    Install webhook on a GitLab resource.
-
-    Args:
-        gitlab_service: GitLab service instance
-        resource_type: Type of resource (PROJECT or GROUP)
-        resource_id: ID of the resource
-        webhook_store: Webhook store instance
-        webhook: Webhook object to install
-
-    Returns:
-        Tuple of (webhook_id, status)
-    """
-    webhook_secret = f'{webhook.user_id}-{str(uuid4())}'
-    webhook_uuid = f'{str(uuid4())}'
-
-    webhook_id, status = await gitlab_service.install_webhook(
-        resource_type=resource_type,
-        resource_id=resource_id,
-        webhook_name=WEBHOOK_NAME,
-        webhook_url=GITLAB_WEBHOOK_URL,
-        webhook_secret=webhook_secret,
-        webhook_uuid=webhook_uuid,
-        scopes=SCOPES,
-    )
-
-    log_extra = {
-        'webhook_id': webhook_id,
-        'status': status,
-        'resource_id': resource_id,
-        'resource_type': resource_type,
-    }
-
-    if status == WebhookStatus.RATE_LIMITED:
-        logger.warning('Rate limited while creating webhook', extra=log_extra)
-        raise BreakLoopException()
-
-    if webhook_id:
-        await webhook_store.update_webhook(
-            webhook=webhook,
-            update_fields={
-                'webhook_secret': webhook_secret,
-                'webhook_exists': True,  # webhook was created
-                'webhook_url': GITLAB_WEBHOOK_URL,
-                'scopes': SCOPES,
-                'webhook_uuid': webhook_uuid,  # required to identify which webhook installation is sending payload
-            },
-        )
-        logger.info('Created new webhook', extra=log_extra)
-    else:
-        logger.error('Failed to create webhook', extra=log_extra)
-
-    return webhook_id, status
 
 
 async def install_claimed_webhook(
