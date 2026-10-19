@@ -359,6 +359,9 @@ services:
       DB_NAME: ${DB_NAME:-openhands}
       DB_USER: ${DB_USER:-openhands}
       DB_PASS: ${DB_PASS:-openhands}
+      # Compose has no LiteLLM proxy; without this the maintenance job tries to repair LiteLLM keys and fails.
+      ENABLE_LEGACY_LITELLM: 'false'
+      OH_WORKER_SCHEDULED_JOBS_MAINTENANCE_TASKS: 'true'
     restart: unless-stopped
 
 # `db-data` / `app-filestore` are declared but currently unused (see the
