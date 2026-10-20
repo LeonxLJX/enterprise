@@ -4,6 +4,7 @@ GitLab is the one fake (``tests.unit.gitlab_fakes``).
 """
 
 import asyncio
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -197,3 +198,68 @@ async def test_failed_create_is_an_error_and_releases_the_claim(
 
     assert failed.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert (await get_row(row_id)).claim_run_id is None
+    # GitLab made the hook even though the response was lost, so it must
+    # authenticate for the next run to adopt it.
+    [hook] = gitlab.hooks[PROJECT]
+    await assert_delivery_authenticates(store, hook)
+
+
+async def test_unexpected_error_releases_the_claim_so_a_retry_is_not_refused(
+    store, gitlab, add_row
+):
+    await add_row()
+    gitlab.fail_create = True
+
+    with pytest.raises(HTTPException) as failed:
+        await reinstall(ADMIN)
+
+    assert failed.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    gitlab.fail_create = False
+    assert (await reinstall(ADMIN)).success
+
+
+async def test_reinstall_claims_only_its_own_resources_row(
+    store, gitlab, add_row, get_row, async_session_maker
+):
+    # Synced longest ago, so first in line for a claim that ignores the resource.
+    other = GitlabWebhook(
+        user_id=USER,
+        project_id='project-0',
+        webhook_exists=False,
+        last_synced=datetime(2000, 1, 1),
+    )
+    async with async_session_maker() as session, session.begin():
+        session.add(other)
+    row_id = await add_row()
+
+    assert (await reinstall(ADMIN)).success
+
+    row = await get_row(row_id)
+    assert row.webhook_exists
+    assert row.reinstall_done_gen == 1
+    untouched = await get_row(other.id)
+    assert untouched.user_id == USER
+    assert untouched.webhook_uuid is None
+
+
+async def test_reinstall_of_a_group_creates_its_row_and_hook(store, gitlab):
+    body = ReinstallWebhookRequest(
+        resource=ResourceIdentifier(type=GitLabResourceType.GROUP, id='group-1')
+    )
+
+    result = await reinstall_gitlab_webhook(body=body, user_id=ADMIN)
+
+    assert result.success
+    [hook] = gitlab.hooks['group-1']
+    await assert_delivery_authenticates(store, hook)
+
+
+async def test_reinstall_needs_a_saas_gitlab_service(store, gitlab, monkeypatch):
+    monkeypatch.setattr(
+        route_module, 'GitLabServiceImpl', lambda external_auth_id: object()
+    )
+
+    with pytest.raises(HTTPException) as refused:
+        await reinstall(ADMIN)
+
+    assert refused.value.status_code == status.HTTP_400_BAD_REQUEST
