@@ -341,14 +341,6 @@ async def reinstall_gitlab_webhook(
             )
 
         try:
-            # The hook sends this user's id, and deliveries authenticate
-            # against the row's user_id.
-            if not await webhook_store.update_claimed(
-                webhook.id, run_id, user_id=user_id
-            ):
-                raise BreakLoopException()
-            webhook.user_id = user_id
-
             webhook_id = await install_claimed_webhook(
                 gitlab_service=gitlab_service,
                 resource_type=resource_type,

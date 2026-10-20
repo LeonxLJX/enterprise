@@ -166,11 +166,13 @@ async def test_reinstall_by_a_non_admin_is_forbidden(store, gitlab):
     assert gitlab.hooks == {}
 
 
-async def test_reinstall_that_cannot_delete_old_hooks_keeps_them_and_releases_the_claim(
+async def test_reinstall_that_cannot_delete_old_hooks_keeps_them_authenticating(
     store, gitlab, add_row, get_row
 ):
-    row_id = await add_row(webhook_exists=True)
-    old = gitlab.add_hook(PROJECT)
+    row_id = await add_row(
+        webhook_exists=True, webhook_uuid='uuid-1', webhook_secret='secret-1'
+    )
+    old = gitlab.add_hook(PROJECT, secret='secret-1', uuid='uuid-1', user=USER)
     gitlab.delete_status = WebhookStatus.RATE_LIMITED
 
     with pytest.raises(HTTPException) as refused:
@@ -178,7 +180,10 @@ async def test_reinstall_that_cannot_delete_old_hooks_keeps_them_and_releases_th
 
     assert refused.value.status_code == status.HTTP_400_BAD_REQUEST
     assert gitlab.hooks[PROJECT] == [old]
-    assert (await get_row(row_id)).claim_run_id is None
+    await assert_delivery_authenticates(store, old)
+    row = await get_row(row_id)
+    assert row.user_id == USER
+    assert row.claim_run_id is None
 
 
 async def test_failed_create_is_an_error_and_releases_the_claim(

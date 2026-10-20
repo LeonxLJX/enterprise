@@ -224,6 +224,13 @@ async def install_claimed_webhook(
         if status is not None:
             raise BreakLoopException()
 
+    # Deliveries authenticate against the row's user_id, so it changes to the
+    # id the new hook will send only once no other hook is left sending the old one.
+    installer_id = gitlab_service.external_auth_id
+    if installer_id and webhook.user_id != installer_id:
+        await _update_row(webhook_store, webhook, {'user_id': installer_id}, run_id)
+        webhook.user_id = installer_id
+
     if not (webhook.webhook_uuid and webhook.webhook_secret):
         credentials = {
             'webhook_secret': f'{webhook.user_id}-{uuid4()}',
