@@ -7,6 +7,7 @@ covered by ``tests/unit/storage/test_org_secrets_store.py``; these tests
 focus on the HTTP/permission layer.
 """
 
+import logging
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -353,6 +354,7 @@ class TestOrgSecretRequestValidation:
     async def test_put_rejects_value_without_mutation_or_disclosure(
         self, validation_store, validation_client, caplog, value, metadata
     ):
+        caplog.set_level(logging.DEBUG)
         client, factory = validation_client
         response = client.put(
             f'/api/organizations/{validation_store.org_id}/secrets/ORG_TOKEN',
@@ -379,6 +381,7 @@ class TestOrgSecretRequestValidation:
     async def test_invalid_names_return_client_error(
         self, validation_store, validation_client, caplog, name, method
     ):
+        caplog.set_level(logging.DEBUG)
         client, factory = validation_client
         url = f'/api/organizations/{validation_store.org_id}/secrets'
         payload = {'name': name}
@@ -398,6 +401,7 @@ class TestOrgSecretRequestValidation:
     def test_create_type_error_does_not_echo_secret_payload(
         self, validation_store, validation_client, caplog
     ):
+        caplog.set_level(logging.DEBUG)
         client, factory = validation_client
         response = client.post(
             f'/api/organizations/{validation_store.org_id}/secrets',
@@ -473,3 +477,50 @@ def test_update_schema_advertises_metadata_only(mock_app):
     schema = mock_app.openapi()['components']['schemas']['OrgSecretUpdate']
     assert set(schema['properties']) == {'name', 'description'}
     assert schema['additionalProperties'] is False
+
+
+@pytest.mark.parametrize(
+    'content_type,body',
+    [
+        ('text/plain', '{"name":"NEW_TOKEN","value":"fake-raw-body-canary"}'),
+        ('application/json', '{"name":"NEW_TOKEN","value":"fake-raw-body-canary"'),
+    ],
+)
+def test_raw_request_validation_does_not_echo_credentials(
+    validation_store, validation_client, caplog, content_type, body
+):
+    caplog.set_level(logging.DEBUG)
+    client, factory = validation_client
+    response = client.post(
+        f'/api/organizations/{validation_store.org_id}/secrets',
+        content=body,
+        headers={'Content-Type': content_type},
+    )
+    assert response.status_code == 422
+    assert 'fake-raw-body-canary' not in response.text
+    assert 'fake-raw-body-canary' not in caplog.text
+    assert all(
+        set(error) == {'type', 'loc', 'msg'} for error in response.json()['detail']
+    )
+    factory.assert_not_awaited()
+
+
+@pytest.mark.parametrize('method', ['post', 'put'])
+def test_member_cannot_submit_invalid_names(mock_app, org_id, mock_member_role, method):
+    with (
+        patch(
+            'server.auth.authorization.get_user_org_role',
+            AsyncMock(return_value=mock_member_role),
+        ),
+        _patch_org_store_get_instance(MagicMock()) as factory,
+    ):
+        url = f'/api/organizations/{org_id}/secrets'
+        payload = {'name': 'BAD-NAME'}
+        if method == 'post':
+            payload['value'] = 'fake-member-invalid-name'
+        else:
+            url += '/ORG_TOKEN'
+        response = getattr(TestClient(mock_app), method)(url, json=payload)
+    assert response.status_code == 403
+    assert 'fake-member-invalid-name' not in response.text
+    factory.assert_not_awaited()
