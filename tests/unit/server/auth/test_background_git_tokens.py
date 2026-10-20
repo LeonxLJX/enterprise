@@ -5,6 +5,8 @@ Runs against the test database. Only the git providers' HTTP endpoints and,
 where a test says so, Keycloak are faked.
 """
 
+import asyncio
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +20,13 @@ from integrations.bitbucket_data_center.bitbucket_dc_service import (
 from integrations.github.github_service import SaaSGitHubService
 from integrations.gitlab.gitlab_service import SaaSGitLabService
 from openhands.app_server.integrations.service_types import ProviderType
+from openhands.app_server.types import AppMode
+from server.auth.gitlab_sync import (
+    _user_has_gitlab_provider,
+    schedule_gitlab_repo_sync,
+)
 from server.auth.token_manager import TokenManager
+from storage.auth_tokens import AuthTokens
 from storage.oauth_token_store import OAuthTokenStore
 
 
@@ -215,3 +223,80 @@ async def test_services_acting_for_a_user_read_oauth_tokens(
 
     assert token is not None
     assert token.get_secret_value() == f'{provider_type.value}-token'
+
+
+@pytest.mark.asyncio
+async def test_an_oauth_v2_gitlab_token_counts_as_gitlab_for_the_repo_sync(
+    create_git_provider, store_oauth_token, create_user
+):
+    gitlab = await create_git_provider(ProviderType.GITLAB)
+    github = await create_git_provider(ProviderType.GITHUB)
+    gitlab_user, github_user = create_user(), create_user()
+    await store_oauth_token(gitlab_user.id, gitlab, 'glpat')
+    await store_oauth_token(github_user.id, github, 'ghp')
+
+    assert await _user_has_gitlab_provider(str(gitlab_user.id)) is True
+    assert await _user_has_gitlab_provider(str(github_user.id)) is False
+
+
+@pytest.mark.asyncio
+async def test_a_keycloak_gitlab_token_still_counts_for_the_repo_sync(
+    oauth_v2_stores, async_session_maker, create_user
+):
+    user_id = str(create_user().id)
+    async with async_session_maker() as session:
+        session.add(
+            AuthTokens(
+                keycloak_user_id=user_id,
+                identity_provider=ProviderType.GITLAB.value,
+                access_token='a',
+                refresh_token='r',
+                access_token_expires_at=0,
+                refresh_token_expires_at=0,
+            )
+        )
+        await session.commit()
+
+    assert await _user_has_gitlab_provider(user_id) is True
+
+
+async def _run_scheduled(schedule: Callable[[], None]) -> None:
+    before = asyncio.all_tasks()
+    schedule()
+    await asyncio.gather(*(asyncio.all_tasks() - before))
+
+
+@pytest.mark.asyncio
+async def test_the_repo_sync_lists_projects_with_the_oauth_v2_token(
+    no_keycloak, create_git_provider, store_oauth_token, create_user
+):
+    gitlab = await create_git_provider(ProviderType.GITLAB)
+    user_id = create_user().id
+    await store_oauth_token(user_id, gitlab, 'glpat-linked')
+    calls = []
+
+    async def record(self, *args, **kwargs):
+        token = await self.get_latest_token()
+        calls.append((token.get_secret_value(), args, kwargs))
+        return []
+
+    # Fakes only the GitLab API call; the token lookup inside it is real.
+    with patch.object(SaaSGitLabService, 'get_all_repositories', new=record):
+        await _run_scheduled(lambda: schedule_gitlab_repo_sync(str(user_id)))
+
+    assert calls == [
+        ('glpat-linked', ('pushed', AppMode.SAAS), {'store_in_background': False})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_repo_sync_skips_a_user_without_a_gitlab_token(
+    no_keycloak, create_git_provider, create_user
+):
+    await create_git_provider(ProviderType.GITLAB)
+    list_repositories = AsyncMock()
+
+    with patch.object(SaaSGitLabService, 'get_all_repositories', new=list_repositories):
+        await _run_scheduled(lambda: schedule_gitlab_repo_sync(str(create_user().id)))
+
+    list_repositories.assert_not_awaited()
