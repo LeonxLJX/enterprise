@@ -308,6 +308,9 @@ services:
       # Docker sandbox, created through the app. Server-to-server calls use
       # the internal service name.
       AUTOMATION_OPENHANDS_API_BASE_URL: http://app:3000
+      # Run sandboxes are not on this network, so they reach the app through
+      # the proxy's published port instead, like OH_SANDBOX_WEB_URL on the app.
+      AUTOMATION_SANDBOX_OPENHANDS_API_BASE_URL: http://host.docker.internal:${APP_PORT:-3100}
       AUTOMATION_SERVICE_KEY: ${AUTOMATION_SERVICE_KEY:-local-compose-service-key}
       AUTOMATION_WEBHOOK_SECRET: ${AUTOMATION_WEBHOOK_SECRET:-local-compose-webhook-secret}
       AUTOMATION_KV_SECRET: ${AUTOMATION_KV_SECRET:-local-compose-kv-secret}
