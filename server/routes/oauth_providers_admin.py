@@ -77,6 +77,7 @@ class AuthProviderResponse(BaseModel):
     icon: str | None
     color: str
     allow_registration: bool
+    allow_match_by_email: bool
     details: AuthProviderDetails
     created_at: datetime
     updated_at: datetime
@@ -110,6 +111,14 @@ class CreateAuthProviderRequest(BaseModel):
             'Whether a brand-new user may be created the first time someone '
             'authenticates through this provider, or only an already-linked '
             'account may sign in through it.'
+        ),
+    )
+    allow_match_by_email: bool = Field(
+        default=True,
+        description=(
+            'Initial value of User.allow_match_by_email for a brand-new user '
+            'created by a login through this provider -- see '
+            'server.auth.provider_identity.resolve_or_create_user.'
         ),
     )
     details: AuthProviderDetails
@@ -158,6 +167,7 @@ class UpdateAuthProviderRequest(BaseModel):
     icon: str | None = None
     color: str | None = None
     allow_registration: bool | None = None
+    allow_match_by_email: bool | None = None
     details: AuthProviderDetails | None = None
 
 
@@ -331,6 +341,7 @@ async def create_oauth_provider(
         icon=body.icon,
         color=body.color,
         allow_registration=body.allow_registration,
+        allow_match_by_email=body.allow_match_by_email,
         details=body.details,
     )
     created = await store.create(provider)

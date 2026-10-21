@@ -17,6 +17,7 @@ const MOCK_AUTH_PROVIDERS: AuthProvider[] = [
     icon: null,
     color: DEFAULT_AUTH_PROVIDER_COLOR,
     allow_registration: true,
+    allow_match_by_email: true,
     details: {
       kind: "OAuthProviderDetails",
       provider_type: "github",
@@ -40,6 +41,7 @@ const MOCK_AUTH_PROVIDERS: AuthProvider[] = [
     icon: null,
     color: "#2563eb",
     allow_registration: true,
+    allow_match_by_email: true,
     details: {
       kind: "OAuthProviderDetails",
       provider_type: "enterprise_sso",
@@ -120,6 +122,7 @@ export const AUTH_PROVIDERS_HANDLERS = [
       icon: body.icon ?? null,
       color: body.color ?? DEFAULT_AUTH_PROVIDER_COLOR,
       allow_registration: body.allow_registration ?? true,
+      allow_match_by_email: body.allow_match_by_email ?? true,
       details: body.details,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -146,6 +149,9 @@ export const AUTH_PROVIDERS_HANDLERS = [
       ...(body.color !== undefined && { color: body.color }),
       ...(body.allow_registration !== undefined && {
         allow_registration: body.allow_registration,
+      }),
+      ...(body.allow_match_by_email !== undefined && {
+        allow_match_by_email: body.allow_match_by_email,
       }),
       ...(body.details !== undefined && {
         details: body.details,
