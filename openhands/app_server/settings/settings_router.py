@@ -528,12 +528,13 @@ async def patch_settings_document(
         settings = existing_settings.model_copy()
         settings.update(payload)
         _post_merge_llm_fixups(settings)
-        rotated = await _maybe_rotate_stale_managed_key(
-            settings.agent_settings.llm,
-            settings_store,
-            user_id,
-        )
-        object.__setattr__(settings.agent_settings, 'llm', rotated)
+        if isinstance(settings.agent_settings, OpenHandsAgentSettings):
+            rotated = await _maybe_rotate_stale_managed_key(
+                settings.agent_settings.llm,
+                settings_store,
+                user_id,
+            )
+            object.__setattr__(settings.agent_settings, 'llm', rotated)
         settings.sync_active_profile_from_settings()
         await settings_store.store_document_patch(payload, settings)
 
