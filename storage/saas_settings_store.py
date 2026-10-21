@@ -10,8 +10,16 @@ from pydantic import SecretStr
 from sqlalchemy import select, text
 from sqlalchemy.orm import joinedload
 
-from openhands.app_server.settings.llm_profiles import LLMProfiles, resolve_profile_llm
-from openhands.app_server.settings.settings_models import Settings
+from openhands.app_server.settings.llm_profiles import (
+    LLMProfiles,
+    has_real_api_key,
+    resolve_profile_llm,
+)
+from openhands.app_server.settings.settings_models import (
+    Settings,
+    agent_llm,
+    normalize_member_agent_settings_diff,
+)
 from openhands.app_server.settings.settings_store import SettingsStore
 from openhands.app_server.utils.jsonpatch_compat import deep_merge
 from openhands.app_server.utils.llm import is_openhands_model
@@ -20,11 +28,13 @@ from openhands.sdk.llm.utils.openhands_provider import (
 )
 from openhands.sdk.mcp.config import MCPServer
 from openhands.sdk.profiles import resolve_agent_profile
+from openhands.sdk.tool.defaults import drop_retired_tool_switches
 from server.auth.token_manager import TokenManager
 from server.constants import (
     LITE_LLM_API_URL,
     canonicalize_bundled_proxy_llm,
     is_bundled_proxy_base_url,
+    should_use_direct_llm_defaults,
 )
 from server.logger import logger
 from server.routes.org_models import (
@@ -39,11 +49,16 @@ from server.verified_models.default_profile import (
 )
 from storage.agent_profile_resolution import (
     OrgLLMProfileLoader,
+    apply_provider_connection,
     load_agent_profiles,
     load_llm_profiles,
 )
 from storage.database import a_session_maker
-from storage.lite_llm_manager import LiteLlmManager, get_openhands_cloud_key_alias
+from storage.lite_llm_manager import (
+    LiteLlmManager,
+    get_openhands_cloud_key_alias,
+    is_litellm_enabled,
+)
 from storage.mcp_config import (
     coerce_persisted_mcp_config,
     serialize_mcp_config,
@@ -88,7 +103,9 @@ class ManagedLlmKeyRotation:
 
 
 def managed_llm_key_config_from_model(
-    llm_model: str | None, llm_base_url: str | None
+    llm_model: str | None,
+    llm_base_url: str | None,
+    provider_connection_id: str | None = None,
 ) -> ManagedLlmKeyConfig | None:
     """Classify an effective LLM config as managed.
 
@@ -97,7 +114,15 @@ def managed_llm_key_config_from_model(
 
     Returns ``None`` when the config is not a managed LiteLLM/OpenHands-provider
     configuration (e.g. member/org BYOK pointing at a third-party base_url).
+
+    An LLM linked to a provider connection (``provider_connection_id`` set) is
+    BYOK by construction: the connection always supplies a user-owned key, so
+    it is never classified as managed even when its ``base_url`` is the managed
+    proxy. Callers that hold an LLM pass the id through so this decision lives
+    in one place rather than at each call site.
     """
+    if provider_connection_id:
+        return None
     openhands_type = is_openhands_model(llm_model)
     normalized_llm_base_url = llm_base_url.rstrip('/') if llm_base_url else None
     normalized_managed_base_url = (
@@ -224,7 +249,14 @@ class SaasSettingsStore(SettingsStore):
     @staticmethod
     def _strip_managed_profile_api_keys(item: Settings) -> None:
         for name, llm in list(item.llm_profiles.profiles.items()):
-            if managed_llm_key_config_from_model(llm.model, llm.base_url) is not None:
+            if (
+                managed_llm_key_config_from_model(
+                    llm.model,
+                    llm.base_url,
+                    getattr(llm, 'provider_connection_id', None),
+                )
+                is not None
+            ):
                 item.llm_profiles.save(name, llm, include_secrets=False)
 
     @staticmethod
@@ -343,8 +375,13 @@ class SaasSettingsStore(SettingsStore):
             # normalize an org's pre-canonical llm_profiles identically.
             resolved_llm = resolved_dump.get('llm')
             if isinstance(resolved_llm, dict):
-                resolved_dump['llm'] = canonicalize_bundled_proxy_llm(
-                    canonicalize_openhands_llm_payload(resolved_llm)
+                # A referenced LLM profile linked to a provider connection
+                # resolves the same way as the composed path below.
+                resolved_dump['llm'] = apply_provider_connection(
+                    org,
+                    canonicalize_bundled_proxy_llm(
+                        canonicalize_openhands_llm_payload(resolved_llm)
+                    ),
                 )
         except Exception as exc:
             # Never-brick contract: catch broadly, not just the known resolver
@@ -407,7 +444,9 @@ class SaasSettingsStore(SettingsStore):
             )
             return None
         org_agent_settings = OrgStore.get_agent_settings_from_org(org)
-        member_agent_settings_diff = dict(org_member.agent_settings_diff)
+        member_agent_settings_diff = normalize_member_agent_settings_diff(
+            dict(org_member.agent_settings_diff)
+        )
         member_agent_settings_diff.pop('mcp_config', None)
         member_mcp_config = org_member.effective_mcp_config
 
@@ -541,7 +580,18 @@ class SaasSettingsStore(SettingsStore):
         seeded_payload: dict[str, Any] | None = None
         if not (kwargs.get('llm_profiles') or {}).get('profiles'):
             legacy_llm = merged_agent_settings.get('llm')
-            if isinstance(legacy_llm, dict) and legacy_llm.get('model'):
+            # With no gateway and no install default there is no default LLM:
+            # a new org holds the SDK's placeholder model until someone saves
+            # an LLM, and the UI saves that LLM as its own profile, so a
+            # seeded Default would be a profile nobody added.
+            has_default_llm = (
+                await is_litellm_enabled() or should_use_direct_llm_defaults()
+            )
+            if (
+                has_default_llm
+                and isinstance(legacy_llm, dict)
+                and legacy_llm.get('model')
+            ):
                 seeded_payload = {
                     'profiles': {'Default': dict(legacy_llm)},
                     'active': 'Default',
@@ -595,6 +645,17 @@ class SaasSettingsStore(SettingsStore):
                 merged_agent_settings['llm'] = merged_llm
                 kwargs['agent_settings'] = merged_agent_settings
 
+        # A linked LLM (org default or an activated profile) takes its key and
+        # base_url from the shared provider connection at read time, so every
+        # member — not only whoever activated the profile — launches with the
+        # connection's credentials, and a rotated key applies on the next load.
+        composed_llm = merged_agent_settings.get('llm')
+        if isinstance(composed_llm, dict) and composed_llm.get(
+            'provider_connection_id'
+        ):
+            merged_agent_settings['llm'] = apply_provider_connection(org, composed_llm)
+            kwargs['agent_settings'] = merged_agent_settings
+
         # Agent Profiles: only on a resolve-requested load (conversation
         # start), resolve the active agent profile and let the result REPLACE
         # the composed agent_settings — the active Agent Profile is the sole
@@ -618,6 +679,15 @@ class SaasSettingsStore(SettingsStore):
                 kwargs['agent_settings'] = resolved_dump
                 kwargs['active_agent_profile_id'] = resolved_id
                 kwargs['active_agent_profile_revision'] = resolved_revision
+
+        # ACP agents make their own model calls, and the SDK rejects an ``llm``
+        # in ACP settings; the org's LLM and profiles are for the OpenHands agent.
+        agent_settings_payload = kwargs.get('agent_settings')
+        if (
+            isinstance(agent_settings_payload, dict)
+            and agent_settings_payload.get('agent_kind') == 'acp'
+        ):
+            agent_settings_payload.pop('llm', None)
 
         settings = Settings(**kwargs)
         settings._mcp_config_updated = False
@@ -801,9 +871,16 @@ class SaasSettingsStore(SettingsStore):
                 )
                 return None
 
-            llm_model = item.agent_settings.llm.model
-            llm_base_url = item.agent_settings.llm.base_url
-            managed_config = managed_llm_key_config_from_model(llm_model, llm_base_url)
+            # ACP agents make their own model calls: no managed key to provision.
+            item_llm = agent_llm(item.agent_settings)
+            llm_model = item_llm.model if item_llm else None
+            llm_base_url = item_llm.base_url if item_llm else None
+            llm_provider_connection_id = getattr(
+                item_llm, 'provider_connection_id', None
+            )
+            managed_config = managed_llm_key_config_from_model(
+                llm_model, llm_base_url, llm_provider_connection_id
+            )
             logger.info(
                 'saas_settings_store:store:managed_llm_config_decision',
                 extra={
@@ -874,7 +951,7 @@ class SaasSettingsStore(SettingsStore):
                 elif hasattr(org, key) and key not in _ORG_OWNED_SETTINGS_KEYS:
                     setattr(org, key, value)
 
-            current_member_llm_api_key = item.agent_settings.llm.api_key
+            current_member_llm_api_key = item_llm.api_key if item_llm else None
             org_default_llm_api_key = org.llm_api_key
             org_default_llm_api_key_raw = (
                 org_default_llm_api_key.get_secret_value()
@@ -902,7 +979,12 @@ class SaasSettingsStore(SettingsStore):
             )
 
             member_mcp_config = org_member.effective_mcp_config
-            member_agent_settings_diff = dict(org_member.agent_settings_diff)
+            # The dump merged in below holds sub-agents in ``tools`` and carries
+            # the current schema version, under which the SDK rejects the
+            # retired switches an older row may still have.
+            member_agent_settings_diff = drop_retired_tool_switches(
+                org_member.agent_settings_diff
+            )
             for private_key in MEMBER_PRIVATE_AGENT_KEYS:
                 member_agent_settings_diff.pop(private_key, None)
             # Single assignment so SQLAlchemy tracks the JSON column change.
@@ -1032,17 +1114,48 @@ class SaasSettingsStore(SettingsStore):
         First checks if an existing key exists for the user and verifies it
         is valid in LiteLLM. If valid, reuses it. Otherwise, generates a new key.
         """
-        llm_api_key = item.agent_settings.llm.api_key or fallback_api_key
+        llm = agent_llm(item.agent_settings)
+        if llm is None:  # ACP agents make their own model calls
+            return
+        if not await is_litellm_enabled():
+            # LiteLLM is disabled deployment-wide: there is no gateway to
+            # generate, verify, or rotate a key against. A managed
+            # (openhands/* or LiteLLM-proxy) model is virtually every
+            # existing member's default, so without this guard *any*
+            # settings save would otherwise unconditionally try to mint a
+            # key and raise ``ValueError`` out of
+            # ``LiteLlmManager.generate_key`` -- caught by
+            # ``store_settings``'s generic exception handler as an opaque
+            # 500. Leave the existing key field untouched (whatever it
+            # already decrypted to, including an empty key) rather than
+            # attempting any LiteLLM call.
+            logger.info(
+                'saas_settings_store:ensure_api_key:skipped_litellm_disabled',
+                extra={'user_id': self.user_id, 'org_id': org_id},
+            )
+            return
+
+        # A ``SecretStr`` can wrap a Python ``None`` (e.g. a pre-existing
+        # member row created before an LLM key was ever assigned, such as a
+        # user provisioned while ENABLE_LEGACY_LITELLM was off). ``bool()``/``len()``
+        # on that value raises inside pydantic rather than reporting "empty",
+        # so route both the settings value and the fallback through
+        # ``has_real_api_key`` -- the same "is this actually set" check
+        # ``llm_api_key_is_set``/``llm_profiles`` already use -- instead of a
+        # bare truthiness check.
+        item_api_key = llm.api_key if has_real_api_key(llm.api_key) else None
+        llm_api_key = item_api_key or (
+            fallback_api_key if has_real_api_key(fallback_api_key) else None
+        )
         logger.info(
             'saas_settings_store:ensure_api_key:evaluate',
             extra={
                 'user_id': self.user_id,
                 'org_id': org_id,
                 'openhands_type': openhands_type,
-                'has_api_key': bool(llm_api_key),
-                'used_fallback_api_key': bool(
-                    fallback_api_key and not item.agent_settings.llm.api_key
-                ),
+                'has_api_key': llm_api_key is not None,
+                'used_fallback_api_key': item_api_key is None
+                and llm_api_key is not None,
             },
         )
 
@@ -1059,7 +1172,7 @@ class SaasSettingsStore(SettingsStore):
                 key_alias,
                 {'type': 'openhands'} if openhands_type else None,
             )
-            item.agent_settings.llm.api_key = SecretStr(generated_key)
+            llm.api_key = SecretStr(generated_key)
             logger.info(
                 'saas_settings_store:store:generated_openhands_key',
                 extra={
@@ -1070,7 +1183,7 @@ class SaasSettingsStore(SettingsStore):
             )
             return
 
-        item.agent_settings.llm.api_key = llm_api_key
+        llm.api_key = llm_api_key
         existing_key_valid = await LiteLlmManager.verify_existing_key(
             llm_api_key.get_secret_value(),  # type: ignore[union-attr]
             self.user_id,
@@ -1101,7 +1214,7 @@ class SaasSettingsStore(SettingsStore):
                 {'type': 'openhands'} if openhands_type else None,
             )
 
-            item.agent_settings.llm.api_key = SecretStr(generated_key)
+            llm.api_key = SecretStr(generated_key)
             logger.info(
                 'saas_settings_store:store:generated_openhands_key',
                 extra={
@@ -1123,8 +1236,15 @@ class SaasSettingsStore(SettingsStore):
         if settings is None:
             return None
 
-        llm = settings.agent_settings.llm
-        if managed_llm_key_config_from_model(llm.model, llm.base_url) is None:
+        llm = agent_llm(settings.agent_settings)
+        if llm is None:  # ACP agents make their own model calls
+            return None
+        if (
+            managed_llm_key_config_from_model(
+                llm.model, llm.base_url, getattr(llm, 'provider_connection_id', None)
+            )
+            is None
+        ):
             return None
 
         async with a_session_maker() as session:
@@ -1207,8 +1327,15 @@ class SaasSettingsStore(SettingsStore):
         if settings is None:
             return False
 
-        llm = settings.agent_settings.llm
-        if managed_llm_key_config_from_model(llm.model, llm.base_url) is None:
+        llm = agent_llm(settings.agent_settings)
+        if llm is None:  # ACP agents make their own model calls
+            return False
+        if (
+            managed_llm_key_config_from_model(
+                llm.model, llm.base_url, getattr(llm, 'provider_connection_id', None)
+            )
+            is None
+        ):
             return False
 
         async with a_session_maker() as session:
@@ -1278,8 +1405,12 @@ class SaasSettingsStore(SettingsStore):
         if settings is None:
             return ManagedLlmKeyRotation(status=ManagedLlmKeyStatus.MISSING_MEMBER)
 
-        llm = settings.agent_settings.llm
-        config = managed_llm_key_config_from_model(llm.model, llm.base_url)
+        llm = agent_llm(settings.agent_settings)
+        if llm is None:  # ACP agents make their own model calls
+            return ManagedLlmKeyRotation(status=ManagedLlmKeyStatus.NOT_MANAGED)
+        config = managed_llm_key_config_from_model(
+            llm.model, llm.base_url, getattr(llm, 'provider_connection_id', None)
+        )
         if config is None:
             return ManagedLlmKeyRotation(status=ManagedLlmKeyStatus.NOT_MANAGED)
 

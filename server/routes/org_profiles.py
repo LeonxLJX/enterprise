@@ -28,6 +28,7 @@ from openhands.app_server.settings.llm_profiles import (
 )
 from openhands.app_server.settings.settings_models import (
     _load_persisted_agent_settings,
+    agent_llm,
 )
 from openhands.app_server.utils.llm import MASKED_API_KEY
 from openhands.app_server.utils.logger import openhands_logger as logger
@@ -318,11 +319,24 @@ async def save_profile(
             # Snapshot current org LLM settings. Route through the persisted
             # loader so legacy/canonical ``agent_kind`` discriminator values
             # ('llm' vs 'openhands') both validate.
-            llm = _load_persisted_agent_settings(org.agent_settings).llm
+            org_llm = agent_llm(_load_persisted_agent_settings(org.agent_settings))
+            if org_llm is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail='ACP agents have no LLM settings to save as a profile',
+                )
+            llm = org_llm
         if request.preserve_existing_api_key and existing is not None:
             # Caller has no new key: keep the profile's stored key (even "no
             # key") instead of the snapshotted one.
             llm = llm.model_copy(update={'api_key': existing.api_key})
+        if getattr(llm, 'provider_connection_id', None):
+            # A linked profile reads its credentials from the connection at
+            # activation/load time. Never keep an inline key or base_url
+            # underneath the link: a stale key would resurface silently on
+            # unlink and misreport ``api_key_set`` (mirrors the SDK
+            # ``LLMProfileStore.save``).
+            llm = llm.model_copy(update={'api_key': None, 'base_url': None})
         if (
             name == DEFAULT_LLM_PROFILE_NAME
             and constants.uses_bundled_litellm_proxy()
@@ -333,7 +347,10 @@ async def save_profile(
             # An explicit save is a concrete choice, even when Canvas omits the URL.
             llm = llm.model_copy(update={'base_url': constants.LITE_LLM_API_URL})
         include_secrets = request.include_secrets and (
-            managed_llm_key_config_from_model(llm.model, llm.base_url) is None
+            managed_llm_key_config_from_model(
+                llm.model, llm.base_url, getattr(llm, 'provider_connection_id', None)
+            )
+            is None
         )
         try:
             profiles.save(name, llm, include_secrets=include_secrets)
@@ -454,6 +471,12 @@ async def activate_profile(
         # profile's key only takes effect if written there.
         llm_dump = llm.model_dump(mode='json', context={'expose_secrets': True})
         profile_api_key = llm_dump.get('api_key')
+        # A profile linked to a provider connection is BYOK by construction
+        # (``_resolve_provider_connection`` above applied the connection's
+        # user-owned key), so the classifier returns None for it. Passing the
+        # id through keeps this consistent with ``SaasSettingsStore.store()``,
+        # which re-classifies on every later save (#559).
+        provider_connection_id = llm_dump.get('provider_connection_id')
         if profile_api_key and profile_api_key != MASKED_API_KEY:
             llm_dump['api_key'] = MASKED_API_KEY
             # Reuse the canonical managed-key detector (same as store()) so a
@@ -461,7 +484,9 @@ async def activate_profile(
             # misclassified as BYOR.
             uses_managed_llm_key = (
                 managed_llm_key_config_from_model(
-                    llm_dump.get('model'), llm_dump.get('base_url')
+                    llm_dump.get('model'),
+                    llm_dump.get('base_url'),
+                    provider_connection_id,
                 )
                 is not None
             )
@@ -477,7 +502,9 @@ async def activate_profile(
             member.has_custom_llm_api_key = False
             if (
                 managed_llm_key_config_from_model(
-                    llm_dump.get('model'), llm_dump.get('base_url')
+                    llm_dump.get('model'),
+                    llm_dump.get('base_url'),
+                    provider_connection_id,
                 )
                 is not None
             ):

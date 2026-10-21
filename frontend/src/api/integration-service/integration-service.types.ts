@@ -103,6 +103,11 @@ export interface AzureDevOpsWebhookStatus {
   work_item_subscription_id: string | null;
   webhook_url: string;
   webhook_secret_set: boolean;
+  can_view_webhooks: boolean;
+  can_manage_webhooks: boolean;
+  install_recorded: boolean;
+  installed_at: string | null;
+  last_verified_at: string | null;
 }
 
 export interface AzureDevOpsWebhookInstallationResult {
@@ -112,4 +117,8 @@ export interface AzureDevOpsWebhookInstallationResult {
   pr_subscription_id: string | null;
   work_item_subscription_id: string | null;
   webhook_url: string;
+}
+
+export interface AzureDevOpsOrganizations {
+  organizations: string[];
 }

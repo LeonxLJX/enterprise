@@ -12,7 +12,7 @@ from typing import Any, AsyncGenerator, BinaryIO, Sequence, cast
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 from pydantic import Field, SecretStr, TypeAdapter
 
 from openhands.agent_server.models import (
@@ -57,6 +57,9 @@ from openhands.app_server.app_conversation.app_conversation_service_base import 
 from openhands.app_server.app_conversation.app_conversation_start_task_service import (
     AppConversationStartTaskService,
 )
+from openhands.app_server.app_conversation.conversation_links import (
+    get_conversation_ui_url,
+)
 from openhands.app_server.app_conversation.conversation_secret_enricher import (
     ConversationSecretEnricher,
 )
@@ -67,6 +70,7 @@ from openhands.app_server.app_conversation.sql_app_conversation_info_service imp
     SQLAppConversationInfoService,
 )
 from openhands.app_server.config import (
+    AppServerConfig,
     get_event_callback_service,
     resolve_provider_llm_base_url,
 )
@@ -110,6 +114,7 @@ from openhands.app_server.settings.settings_models import (
 )
 from openhands.app_server.user.user_context import UserContext
 from openhands.app_server.user.user_models import UserInfo
+from openhands.app_server.user_auth.user_auth import AuthType
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
@@ -135,9 +140,11 @@ from openhands.sdk.marketplace.registration import (
 from openhands.sdk.mcp.config import MCPServer
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.secret import LookupSecret, StaticSecret
-from openhands.sdk.settings import ACPAgentSettings
+from openhands.sdk.settings import ACPAgentSettings, OpenHandsAgentSettings
 from openhands.sdk.subagent import get_registered_agent_definitions
+from openhands.sdk.tool import SUB_AGENT_TOOL_NAME, ClientToolSpec, Tool
 from openhands.sdk.tool.builtins import SwitchLLMTool
+from openhands.sdk.tool.defaults import selects_tool
 from openhands.sdk.utils.redact import (
     redact_api_key_literals,
     redact_text_secrets,
@@ -153,10 +160,15 @@ from openhands.tools.preset.planning import (
     get_planning_tools,
 )
 
-_conversation_info_type_adapter = TypeAdapter(list[ConversationInfo | None])
+_conversation_info_type_adapter: TypeAdapter[list[ConversationInfo | None]] = (
+    TypeAdapter(list[ConversationInfo | None])
+)
 _logger = logging.getLogger(__name__)
 
 _EXPORT_LOCK_KEY_PREFIX = 'app_conversation_export'
+# Upper bound for the provider lookup of a repository started without a
+# provider, so a slow git provider cannot hold up the conversation start.
+_GIT_PROVIDER_LOOKUP_TIMEOUT_SECONDS = 10
 
 
 def _resolve_title_llm_profile(user: UserInfo) -> str | None:
@@ -233,6 +245,8 @@ The selected repository was cloned as a shallow clone. Git history may be incomp
 def _exception_detail(exc: Exception) -> str:
     """HTTPException.__str__ prepends '<status>: '; prefer its clean .detail."""
     detail = getattr(exc, 'detail', None)
+    if isinstance(detail, dict) and isinstance(detail.get('message'), str):
+        return detail['message']
     return detail if isinstance(detail, str) else str(exc)
 
 
@@ -312,6 +326,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
     export_lock_ttl_seconds: int = 3600
     export_lock_refresh_interval_seconds: int = 30
     export_lock_required: bool | None = None
+    enable_child_conversation_launcher: bool = False
 
     def _maybe_append_shallow_clone_context(
         self,
@@ -404,61 +419,11 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
     async def start_app_conversation(
         self, request: AppConversationStartRequest
     ) -> AsyncGenerator[AppConversationStartTask, None]:
-        quota_user_id = await self.user_context.get_user_id()
-        quota_reserved = bool(
-            getattr(self.user_context, '_daily_quota_reserved', False)
-        )
-        if quota_reserved:
-            setattr(self.user_context, '_daily_quota_reserved', False)
-        elif quota_user_id:
-            quota_reserved = await self._reserve_daily_conversation_quota(quota_user_id)
-
-        try:
-            async for task in self._start_app_conversation(request):
-                await self.app_conversation_start_task_service.save_app_conversation_start_task(
-                    task
-                )
-                if quota_reserved:
-                    if task.status == AppConversationStartTaskStatus.ERROR:
-                        await self._release_daily_conversation_quota(quota_user_id)
-                        quota_reserved = False
-                    elif task.status == AppConversationStartTaskStatus.READY:
-                        quota_reserved = False
-                yield task
-        except BaseException:
-            if quota_reserved:
-                await self._release_daily_conversation_quota(quota_user_id)
-            raise
-
-    async def _reserve_daily_conversation_quota(self, user_id: str) -> bool:
-        try:
-            from openhands.app_server.shared import server_config
-            from server.services.daily_conversation_quota_service import (
-                DailyConversationQuotaService,
+        async for task in self._start_app_conversation(request):
+            await self.app_conversation_start_task_service.save_app_conversation_start_task(
+                task
             )
-            from storage.database import a_session_maker
-        except ImportError:
-            return False
-        get_effective_org_id = getattr(self.user_context, 'get_effective_org_id', None)
-        org_id = await get_effective_org_id() if get_effective_org_id else None
-        if server_config.app_mode.value != 'saas' or org_id is None:
-            return False
-        async with a_session_maker() as session:
-            return await DailyConversationQuotaService(session).reserve(user_id, org_id)
-
-    async def _release_daily_conversation_quota(self, user_id: str | None) -> None:
-        if not user_id:
-            return
-        try:
-            from server.services.daily_conversation_quota_service import (
-                DailyConversationQuotaService,
-            )
-            from storage.database import a_session_maker
-
-            async with a_session_maker() as session:
-                await DailyConversationQuotaService(session).release(user_id)
-        except Exception:
-            _logger.exception('Failed to release daily conversation quota reservation')
+            yield task
 
     async def _start_app_conversation(
         self, request: AppConversationStartRequest
@@ -485,13 +450,50 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             self._inherit_configuration_from_parent(request, parent_info)
 
         self._apply_suggested_task(request)
+        self._apply_default_trigger(request)
 
         # Resolved once: validation, the build and provenance must see one revision.
         user = await self.user_context.get_user_info(
             resolve_agent_profile=True,
             override_agent_profile_id=request.agent_profile_id,
         )
-        validate_acp_provider_surfaced(user.agent_settings)
+        agent_settings = user.agent_settings
+        validate_acp_provider_surfaced(agent_settings)
+        if isinstance(agent_settings, ACPAgentSettings) and request.client_tools:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='client_tools are not supported for ACP agent launches',
+            )
+        if request.llm_profile:
+            if not isinstance(agent_settings, OpenHandsAgentSettings):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail='llm_profile is not supported for ACP agent launches',
+                )
+            profile_llm = user.llm_profiles.get(request.llm_profile)
+            if profile_llm is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Profile '{request.llm_profile}' not found",
+                )
+            # Imported lazily: settings_router transitively imports this service,
+            # so a module-level import would be circular.
+            from openhands.app_server.settings.settings_router import (
+                LITE_LLM_API_URL,
+            )
+
+            # Resolve the profile as switch_profile does, and copy rather than
+            # mutate: the user context may cache the resolved settings.
+            agent_settings = agent_settings.model_copy(
+                update={
+                    'llm': resolve_profile_llm(
+                        profile_llm,
+                        managed_proxy_url=LITE_LLM_API_URL,
+                        fallback_api_key=agent_settings.llm.api_key,
+                    )
+                }
+            )
+            user = user.model_copy(update={'agent_settings': agent_settings})
 
         task = AppConversationStartTask(
             created_by_user_id=user_id,
@@ -538,6 +540,17 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             ):
                 yield updated_task
 
+            # Resolve the provider before the agent-server starts the
+            # conversation, so the save below is not delayed while the
+            # "started" webhook may already be writing the row. The agent
+            # gets the same provider, so its PLAN.md path matches the one
+            # that sub-conversations inherit from the saved row.
+            git_provider = request.git_provider
+            if request.selected_repository and git_provider is None:
+                git_provider = await self._resolve_git_provider(
+                    request.selected_repository
+                )
+
             _logger.info(
                 'app_conversation_start:building_start_request',
                 extra={
@@ -557,7 +570,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     conversation_id,
                     request.initial_message,
                     request.system_message_suffix,
-                    request.git_provider,
+                    git_provider,
                     working_dir,
                     request.agent_type,
                     request.llm_model,
@@ -566,6 +579,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     selected_repository=request.selected_repository,
                     selected_branch=request.selected_branch,
                     plugins=request.plugins,
+                    client_tools=request.client_tools,
                     api_secrets=request.secrets,
                     system_prompt=request.system_prompt,
                     disabled_skills=request.disabled_skills,
@@ -666,8 +680,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             conversation_tags: dict[str, str] = {**(request.tags or {}), **tags}
             if request.selected_repository:
                 conversation_tags['repo_name'] = request.selected_repository
-            if request.git_provider:
-                conversation_tags['git_provider'] = request.git_provider.value
+            if git_provider:
+                conversation_tags['git_provider'] = git_provider.value
             if request.selected_branch:
                 conversation_tags['selected_branch'] = request.selected_branch
 
@@ -681,7 +695,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 # Git parameters
                 selected_repository=request.selected_repository,
                 selected_branch=request.selected_branch,
-                git_provider=request.git_provider,
+                git_provider=git_provider,
                 trigger=request.trigger,
                 pr_number=request.pr_number,
                 parent_conversation_id=request.parent_conversation_id,
@@ -871,6 +885,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             sandbox_status=sandbox_status,
             execution_status=execution_status,
             conversation_url=conversation_url,
+            conversation_ui_url=get_conversation_ui_url(app_conversation_info.id),
             session_api_key=session_api_key,
         )
 
@@ -1208,6 +1223,21 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         if not request.llm_model and parent_info.llm_model:
             request.llm_model = parent_info.llm_model
 
+    def _apply_default_trigger(self, request: AppConversationStartRequest) -> None:
+        """Default the trigger when the caller did not supply one.
+
+        Mirrors the V0 endpoint: bearer (API key) auth is ``REMOTE_API_KEY``,
+        everything else is ``GUI``.
+        """
+        if request.trigger is not None:
+            return
+        user_auth = getattr(self.user_context, 'user_auth', None)
+        auth_type = user_auth.get_auth_type() if user_auth is not None else None
+        if auth_type == AuthType.BEARER:
+            request.trigger = ConversationTrigger.REMOTE_API_KEY
+        else:
+            request.trigger = ConversationTrigger.GUI
+
     def _apply_suggested_task(self, request: AppConversationStartRequest) -> None:
         """Apply suggested task defaults to the start request."""
         suggested_task: SuggestedTask | None = request.suggested_task
@@ -1362,23 +1392,22 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         Returns:
             Configured LLM instance
         """
-        model: str = (
-            llm_model
-            or user.agent_settings.llm.model
-            or LLM.model_fields['model'].default
-        )
+        # ACP conversations return before the LLM is configured.
+        assert isinstance(user.agent_settings, OpenHandsAgentSettings)
+        user_llm = user.agent_settings.llm
+        model: str = llm_model or user_llm.model or LLM.model_fields['model'].default
 
         base_url = resolve_provider_llm_base_url(
             model,
-            user.agent_settings.llm.base_url,
+            user_llm.base_url,
             provider_base_url=self.openhands_provider_base_url,
         )
 
-        return user.agent_settings.llm.model_copy(
+        return user_llm.model_copy(
             update={
                 'model': model,
                 'base_url': base_url,
-                'api_key': user.agent_settings.llm.api_key,
+                'api_key': user_llm.api_key,
                 'usage_id': 'agent',
                 # Force streaming on (the SDK LLM defaults stream=False).
                 'stream': True,
@@ -1438,7 +1467,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             )
             return llm
 
-        managed_config = managed_llm_key_config_from_model(llm.model, llm.base_url)
+        managed_config = managed_llm_key_config_from_model(
+            llm.model, llm.base_url, getattr(llm, 'provider_connection_id', None)
+        )
         if managed_config is None:
             _logger.debug(
                 'managed_llm_key_refresh:skip_non_managed_base_url',
@@ -2063,6 +2094,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         selected_repository: str | None = None,
         selected_branch: str | None = None,
         plugins: list[PluginSpec] | None = None,
+        client_tools: list[ClientToolSpec] | None = None,
         api_secrets: dict[str, SecretStr] | None = None,
         system_prompt: str | None = None,
         disabled_skills: list[str] | None = None,
@@ -2095,6 +2127,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             selected_repository: Optional repository name
             selected_branch: Optional selected branch name
             plugins: Optional list of plugins to load
+            client_tools: Optional client-defined tools to register with the runtime.
             api_secrets: Optional secrets passed directly via the API.
                 These are merged with existing secrets (from database
                 and git providers), with API-provided secrets taking
@@ -2150,6 +2183,10 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                         'user_id': user.id,
                         'conversation_id': str(conversation_id),
                     },
+                )
+            if client_tools:
+                raise ValueError(
+                    'client_tools are not supported for ACP agent launches'
                 )
             acp_request = await self._build_acp_start_conversation_request(
                 user=user,
@@ -2249,12 +2286,49 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             tools = get_planning_tools(plan_path=plan_path)
         else:
             register_builtins_agents(enable_browser=True)
+            # Sub-agents are on when the saved tools include the task tool set,
+            # as the SDK's retired ``enable_sub_agents`` property decided.
+            enable_sub_agents = user.agent_settings.tools is not None and selects_tool(
+                user.agent_settings.tools, SUB_AGENT_TOOL_NAME
+            )
             tools = get_default_tools(
                 enable_browser=True,
-                enable_sub_agents=user.agent_settings.enable_sub_agents,
+                enable_sub_agents=enable_sub_agents,
             )
-            if user.agent_settings.enable_sub_agents:
+            if enable_sub_agents:
                 agent_definitions = list(get_registered_agent_definitions())
+            if self.enable_child_conversation_launcher and self.web_url:
+                # Server-side child launches: the tool runs inside the sandbox
+                # and calls back into this app server, which provisions the
+                # child through the normal lifecycle (see
+                # child_conversation_router). Gated because every sandbox
+                # image must carry the tool before it is attached, and Agent
+                # Canvas must know how to treat server-launched children on
+                # Cloud. Imported here: the pinned openhands-sdk may predate
+                # the tool, in which case the launcher is skipped.
+                try:
+                    from openhands.tools.child_conversation import (
+                        StartChildConversationTool,
+                    )
+                except ImportError:
+                    _logger.warning(
+                        'OH_ENABLE_CHILD_CONVERSATION_LAUNCHER is set but this '
+                        'openhands-sdk has no start_child_conversation tool; '
+                        'conversation %s starts without it',
+                        conversation_id,
+                    )
+                else:
+                    tools.append(
+                        Tool(
+                            name=StartChildConversationTool.name,
+                            params={
+                                'launch_url': (
+                                    f'{self.web_url}/api/v1/webhooks/'
+                                    f'conversations/{conversation_id}/children'
+                                )
+                            },
+                        )
+                    )
 
         # --- build AgentSettings and create agent ---------------------------
         # When enterprise persistent memory is enabled, stamp load_memory=True
@@ -2400,6 +2474,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 observability_tags, request_observability_tags
             )
         create_kwargs: dict[str, Any] = {'agent': agent, 'user_id': laminar_user_id}
+        if client_tools:
+            create_kwargs['client_tools'] = client_tools
         title_llm_profile = _resolve_title_llm_profile(user)
         if title_llm_profile:
             create_kwargs['title_llm_profile'] = title_llm_profile
@@ -2594,14 +2670,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         # Isolate the CLI data dir onto the durable /workspace tree so the SDK
         # self-resumes the provider session (session/load from base_state.json)
         # across pause/resume — matching the regular-agent lifecycle (#1274).
-        # Strip llm.api_key/base_url to prevent proxy settings from leaking
-        # into the subprocess env (ACP CLIs handle their own LLM calls).
-        settings_update: dict[str, Any] = {
-            'acp_isolate_data_dir': True,
-            'llm': acp_settings.llm.model_copy(
-                update={'api_key': None, 'base_url': None}
-            ),
-        }
+        # ACP settings carry no LLM: ACP CLIs handle their own LLM calls.
+        settings_update: dict[str, Any] = {'acp_isolate_data_dir': True}
         # Forward the resolved profile's / user's custom MCP servers to the ACP
         # subprocess (#15044 §7). Only custom servers — the system OpenHands MCP
         # server (Tavily proxy) is runtime-internal and unreachable by an external
@@ -2823,6 +2893,26 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             f'Successfully updated agent-server conversation {conversation_id} title to "{new_title}"'
         )
 
+    async def _resolve_git_provider(self, repository: str) -> ProviderType | None:
+        """Return the provider of a repository that was started without one.
+
+        The clone already resolves the provider from the user's tokens, but the
+        start request may not carry it (e.g. API clients). Best effort: returns
+        None when the provider cannot be found in time, so the start never fails.
+        """
+        try:
+            provider_handler = await self.user_context.get_provider_handler()
+            repo = await asyncio.wait_for(
+                provider_handler.verify_repo_provider(repository, is_optional=True),
+                timeout=_GIT_PROVIDER_LOOKUP_TIMEOUT_SECONDS,
+            )
+            return repo.git_provider
+        except Exception:
+            _logger.warning(
+                f'Could not resolve the git provider of {repository}', exc_info=True
+            )
+            return None
+
     def _validate_repository_update(
         self,
         request: AppConversationUpdateRequest,
@@ -2841,10 +2931,13 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         if 'selected_repository' in request.model_fields_set:
             repo = request.selected_repository
             if repo is not None:
-                # Validate repository format (owner/repo)
-                if '/' not in repo or repo.count('/') != 1:
+                # Validate repository format: owner/repo, or more segments for
+                # Azure DevOps (org/project/repo) and GitLab subgroups.
+                segments = repo.split('/')
+                if len(segments) < 2 or not all(segments):
                     raise ValueError(
-                        f"Invalid repository format: '{repo}'. Expected 'owner/repo'."
+                        f"Invalid repository format: '{repo}'. Expected 'owner/repo' "
+                        "or more path segments (e.g. 'org/project/repo')."
                     )
 
                 # Sanitize: check for dangerous characters
@@ -3227,6 +3320,17 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         return b''.join(chunks)
 
 
+def get_sandbox_web_url(
+    config: AppServerConfig, sandbox_service: SandboxService
+) -> str | None:
+    """Return the URL the sandbox uses to reach OpenHands."""
+    web_url = config.sandbox_web_url or config.web_url
+    # If no web url has been set and we are using docker, we can use host.docker.internal
+    if web_url is None and isinstance(sandbox_service, DockerSandboxService):
+        web_url = f'http://host.docker.internal:{sandbox_service.host_port}'
+    return web_url
+
+
 class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
     sandbox_startup_timeout: int = Field(
         default=120, description='The max timeout time for sandbox startup'
@@ -3312,11 +3416,8 @@ class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
                 )
             config = get_global_config()
 
-            # If no web url has been set and we are using docker, we can use host.docker.internal
-            web_url = config.web_url
-            if web_url is None:
-                if isinstance(sandbox_service, DockerSandboxService):
-                    web_url = f'http://host.docker.internal:{sandbox_service.host_port}'
+            # Every use of web_url in this service is a URL the sandbox calls.
+            web_url = get_sandbox_web_url(config, sandbox_service)
 
             # Get app_mode for SaaS mode
             app_mode = None
@@ -3352,6 +3453,9 @@ class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
                 max_num_conversations_per_sandbox=self.max_num_conversations_per_sandbox,
                 httpx_client=httpx_client,
                 web_url=web_url,
+                enable_child_conversation_launcher=(
+                    config.enable_child_conversation_launcher
+                ),
                 openhands_provider_base_url=config.openhands_provider_base_url,
                 access_token_hard_timeout=access_token_hard_timeout,
                 conversation_secret_enricher=conversation_secret_enricher,

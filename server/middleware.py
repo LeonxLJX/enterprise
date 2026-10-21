@@ -18,6 +18,7 @@ from server.auth.auth_error import (
 from server.auth.cookie_chunking import delete_chunked_cookie, read_chunked_cookie
 from server.auth.gitlab_sync import schedule_gitlab_repo_sync
 from server.auth.saas_user_auth import SaasUserAuth, token_manager
+from server.constants import REQUIRE_VERIFIED_EMAILS
 from server.routes.auth import set_response_cookie
 from server.routes.oauth_v2 import _set_oauth_v2_cookie
 from server.utils.url_utils import get_cookie_domain, get_cookie_samesite
@@ -88,7 +89,8 @@ class SetAuthCookieMiddleware:
                     schedule_gitlab_repo_sync(user_id)
 
             if (
-                self._should_attach(request)
+                REQUIRE_VERIFIED_EMAILS
+                and self._should_attach(request)
                 and not request.url.path.startswith('/api/email')
                 and request.url.path
                 not in ('/api/settings', '/api/logout', '/api/authenticate')
@@ -156,6 +158,7 @@ class SetAuthCookieMiddleware:
             user_id=user_id,
             access_token_expires_at=user_auth.access_token_expires_at,
             accepted_tos=bool(user_auth.accepted_tos),
+            idp_provider_id=user_auth.idp_provider_id,
             refresh_token_expires_at=user_auth.idp_refresh_token_expires_at,
         )
 
@@ -229,6 +232,10 @@ class SetAuthCookieMiddleware:
             '/oauth/device/authorize',
             '/oauth/device/token',
             '/api/v1/web-client/config',
+            # Integrated IDP status is unauthenticated (the frontend reads it to
+            # decide whether to show the integrated login path). Only
+            # available on self-hosted with no real IDP configured.
+            '/api/idp/status',
             # OAuth providers redirect the user's browser here after an MCP
             # server install consent; the cross-site navigation carries no
             # session cookie and the route validates its single-use state.
