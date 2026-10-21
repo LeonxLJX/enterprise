@@ -632,12 +632,13 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             except httpx.HTTPStatusError as exc:
                 # A custom image that 500s on create is usually an openhands-sdk
                 # mismatch /server_info couldn't reveal; add an actionable hint.
-                if is_custom_sandbox_spec(sandbox.sandbox_spec_id):
+                image = getattr(sandbox_spec, 'image', None) or sandbox.sandbox_spec_id
+                if is_custom_sandbox_spec(image):
                     expected = _expected_sdk_version()
                     raise SandboxError(
                         f'Conversation create failed (HTTP '
                         f'{exc.response.status_code}) on custom sandbox image '
-                        f'{sandbox.sandbox_spec_id}. Verify its openhands-sdk '
+                        f'{image}. Verify its openhands-sdk '
                         f'matches this release'
                         + (f' ({expected})' if expected else '')
                         + '; rebuild/re-pin the image if not.'
