@@ -31,8 +31,9 @@ SCOPES: list[str] = [
     'pipeline_events',
 ]
 
-# A run refreshes a row's claim just before creating its hook, so the lease only
-# has to outlast one row's GitLab calls, not a whole run.
+# A run refreshes a row's claim when it starts on the row and again just before
+# creating its hook, so the lease only has to outlast one row's GitLab calls,
+# not a whole run.
 CLAIM_LEASE = timedelta(minutes=10)
 
 
@@ -193,6 +194,12 @@ async def install_claimed_webhook(
 
     Raises BreakLoopException when the row is done for this run.
     """
+    # The batch was claimed when the run started; without this, a row reached
+    # after the lease could delete hooks that a newer claimant just installed.
+    if not await webhook_store.refresh_claim(webhook.id, run_id):
+        log_stale_write_rejected(webhook, run_id)
+        raise BreakLoopException()
+
     served_gen = webhook.reinstall_requested_gen
     reinstall = served_gen > webhook.reinstall_done_gen
 

@@ -4,16 +4,21 @@ GitLab is the one fake (``tests.unit.gitlab_fakes``).
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException, status
+from sqlalchemy import func, update
 
 import server.routes.integration.gitlab as route_module
 import storage.gitlab_webhook_store as store_module
 import sync.install_gitlab_webhooks as job_module
-from integrations.gitlab.webhook_installation import CLAIM_LEASE
+from integrations.gitlab.webhook_installation import (
+    CLAIM_LEASE,
+    BreakLoopException,
+    install_claimed_webhook,
+)
 from integrations.types import GitLabResourceType
 from server.routes.integration.gitlab import (
     ReinstallWebhookRequest,
@@ -155,6 +160,41 @@ async def test_reinstall_racing_a_scheduled_run_installs_one_hook(
 
     [hook] = gitlab.hooks[PROJECT]
     await assert_delivery_authenticates(store, hook)
+
+
+async def test_run_reaching_a_row_after_its_lease_keeps_the_reinstalled_hook(
+    store, gitlab, add_row, get_row, async_session_maker
+):
+    # A pending request, e.g. from an earlier reinstall that failed.
+    row_id = await add_row(
+        webhook_exists=True,
+        webhook_uuid='uuid-1',
+        webhook_secret='secret-1',
+        reinstall_requested_gen=1,
+    )
+    gitlab.add_hook(PROJECT, secret='secret-1', uuid='uuid-1', user=USER)
+    run_a = uuid4()
+    [stale] = await store.claim_rows(run_a, CLAIM_LEASE)
+    # Run A's earlier rows took longer than the lease.
+    async with async_session_maker() as session, session.begin():
+        await session.execute(
+            update(GitlabWebhook)
+            .where(GitlabWebhook.id == row_id)
+            .values(claimed_at=func.now() - CLAIM_LEASE - timedelta(minutes=1))
+        )
+    assert (await reinstall(ADMIN)).success
+    [reinstalled] = gitlab.hooks[PROJECT]
+
+    with pytest.raises(BreakLoopException):
+        await install_claimed_webhook(
+            gitlab, GitLabResourceType.PROJECT, PROJECT, store, stale, run_a
+        )
+
+    assert gitlab.hooks[PROJECT] == [reinstalled]
+    await assert_delivery_authenticates(store, reinstalled)
+    row = await get_row(row_id)
+    assert row.user_id == ADMIN
+    assert row.reinstall_done_gen == row.reinstall_requested_gen == 2
 
 
 async def test_reinstall_by_a_non_admin_is_forbidden(store, gitlab):
