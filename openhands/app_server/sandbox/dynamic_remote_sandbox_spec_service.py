@@ -72,7 +72,10 @@ class DynamicRemoteSandboxSpecService(SandboxSpecService):
         specs: list[SandboxSpecInfo] = []
         for config in response.json().get('configs', []):
             spec = RemoteSandboxSpecInfo(
-                id=config['image'],
+                id=config['name'],
+                image=config['image'],
+                warm_runtime_config_name=config['name'],
+                display_name=config.get('display_name'),
                 command=config['command'],
                 initial_env=config['environment'],
                 working_dir=config['working_dir'],
@@ -110,7 +113,16 @@ class DynamicRemoteSandboxSpecService(SandboxSpecService):
 
     async def get_sandbox_spec(self, sandbox_spec_id: str) -> SandboxSpecInfo | None:
         specs = await self._fetch_specs()
-        return next((s for s in specs if s.id == sandbox_spec_id), None)
+        exact = next((s for s in specs if s.id == sandbox_spec_id), None)
+        if exact is not None:
+            return exact
+        # Legacy saved defaults and existing sandbox rows used the image as ID.
+        # Prefer the operator default when several templates share that image.
+        matches = [s for s in specs if getattr(s, 'image', None) == sandbox_spec_id]
+        return next(
+            (s for s in matches if s.id == self.default_spec_name),
+            matches[0] if matches else None,
+        )
 
     async def get_default_sandbox_spec(self) -> SandboxSpecInfo:
         specs = await self._fetch_specs()
