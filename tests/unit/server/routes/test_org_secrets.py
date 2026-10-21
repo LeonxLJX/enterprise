@@ -362,7 +362,7 @@ class TestOrgSecretRequestValidation:
         )
         assert response.status_code == 422
         assert any(
-            error['loc'] == ['body', 'value'] and error['type'] == 'extra_forbidden'
+            error['loc'] == ['body'] and error['type'] == 'extra_forbidden'
             for error in response.json()['detail']
         )
         assert 'fake-attempted-canary' not in response.text
@@ -438,7 +438,7 @@ async def test_valid_names_and_metadata_updates_still_work(
 @pytest.mark.parametrize(
     'payload',
     [
-        {'unsupported': {'nested': 'fake-unknown-field-canary'}},
+        {'fake-unknown-field-canary': {'nested': 'fake-unknown-field-canary'}},
         {'name': 123, 'value': 'fake-unknown-field-canary'},
         {'description': {'nested': 'fake-unknown-field-canary'}},
         ['fake-unknown-field-canary'],

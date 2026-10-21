@@ -7,13 +7,10 @@ set on creation and rotated only by deleting and re-creating the secret —
 no endpoint returns the raw value.
 """
 
-from collections.abc import Callable, Coroutine
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.exceptions import RequestValidationError
-from fastapi.routing import APIRoute
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, SecretStr
 
 from openhands.app_server.secrets.secrets_models import (
@@ -22,34 +19,12 @@ from openhands.app_server.secrets.secrets_models import (
 from openhands.app_server.utils.env_var_validation import is_valid_env_var_name
 from openhands.app_server.utils.models import EditResponse
 from server.auth.authorization import Permission, require_permission
+from server.routes.org_secret_validation import OrgSecretValidationRoute
 from storage.org_secrets_store import (
     OrgSecretAlreadyExistsError,
     OrgSecretNotFoundError,
     OrgSecretsStore,
 )
-
-
-class OrgSecretsRoute(APIRoute):
-    """Do not reflect submitted credentials in request-validation responses."""
-
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        handler = super().get_route_handler()
-
-        async def handle(request: Request) -> Response:
-            try:
-                return await handler(request)
-            except RequestValidationError as exc:
-                # FastAPI's default response includes each rejected raw input,
-                # even for SecretStr and forbidden extra fields such as value.
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=[
-                        {key: error[key] for key in ('type', 'loc', 'msg')}
-                        for error in exc.errors()
-                    ],
-                ) from None
-
-        return handle
 
 
 def _validate_secret_name(name: str) -> str:
@@ -67,7 +42,7 @@ OrgSecretName = Annotated[str, AfterValidator(_validate_secret_name)]
 org_secrets_router = APIRouter(
     prefix='/api/organizations',
     tags=['Org Secrets'],
-    route_class=OrgSecretsRoute,
+    route_class=OrgSecretValidationRoute,
 )
 
 
