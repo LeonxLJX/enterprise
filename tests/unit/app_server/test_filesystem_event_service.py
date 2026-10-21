@@ -565,6 +565,41 @@ class TestEventIndex:
         assert stale_path.exists()
 
     @pytest.mark.asyncio
+    async def test_event_saved_during_rebuild_is_returned_by_later_searches(
+        self, service: FilesystemEventService
+    ):
+        """An event saved after a rebuild lists the folder, but before the
+        rebuild writes index.json, is not hidden by that index."""
+        conversation_id = uuid4()
+        await service.save_event(conversation_id, create_token_event())
+        late_event = create_pause_event()
+        original_search_paths = service._search_paths
+        calls = 0
+
+        def search_paths_then_save(
+            prefix: Path, page_id: str | None = None
+        ) -> list[Path]:
+            nonlocal calls
+            calls += 1
+            paths = original_search_paths(prefix)
+            if calls == 1:
+                # The steps of save_event. index.json does not exist yet, so
+                # the invalidate does nothing.
+                late_path = prefix / f'{late_event.id.replace("-", "")}.json'
+                service._store_event(late_path, late_event)
+                service._invalidate_index(prefix)
+            return paths
+
+        service._search_paths = search_paths_then_save  # type: ignore[assignment]
+        try:
+            await service.search_events(conversation_id)
+        finally:
+            service._search_paths = original_search_paths  # type: ignore[assignment]
+
+        result = await service.search_events(conversation_id)
+        assert late_event.id in {item.id for item in result.items}
+
+    @pytest.mark.asyncio
     async def test_search_rebuilds_from_stale_incrementally(
         self, service: FilesystemEventService
     ):

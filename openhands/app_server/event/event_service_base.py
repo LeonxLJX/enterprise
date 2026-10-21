@@ -242,7 +242,8 @@ class EventServiceBase(EventService, ABC):
         Seeds from index_stale.json if present, then scans for any event files
         not already in the seed and loads only those. Deduplicates by event id.
         Loads missing events in batches so transient memory is bounded by the
-        batch size, not the conversation size. Writes index.json.
+        batch size, not the conversation size. Writes index.json, then scans
+        again and invalidates it if event files appeared during the rebuild.
         """
         loop = asyncio.get_running_loop()
         stale_path = self._index_stale_path(conversation_path)
@@ -282,6 +283,14 @@ class EventServiceBase(EventService, ABC):
         index = list(seeded.values())
         index_path = self._index_path(conversation_path)
         await loop.run_in_executor(None, self._store_index, index_path, index)
+
+        # An event saved after the first scan may have found no index.json to
+        # invalidate. If a second scan finds new files, invalidate the index
+        # just written so the next search adds them.
+        listed = {p.name for p in paths} | {INDEX_FILENAME, INDEX_STALE_FILENAME}
+        paths = await loop.run_in_executor(None, self._search_paths, conversation_path)
+        if any(p.name not in listed for p in paths):
+            await loop.run_in_executor(None, self._invalidate_index, conversation_path)
         return index
 
     async def search_events(
@@ -425,8 +434,7 @@ class EventServiceBase(EventService, ABC):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._store_event, path, event)
         # Invalidate the index so the next search rebuilds it. Idempotent: a
-        # no-op if index.json is already absent (already stale). This is the
-        # only writer of the stale marker.
+        # no-op if index.json is already absent (already stale).
         conversation_path = path.parent
         await loop.run_in_executor(None, self._invalidate_index, conversation_path)
 
