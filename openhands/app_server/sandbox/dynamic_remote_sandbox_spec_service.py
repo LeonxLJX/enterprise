@@ -35,10 +35,10 @@ def _default_if_none(value: int | None, default: int) -> int:
 class DynamicRemoteSandboxSpecService(SandboxSpecService):
     """Sandbox spec service backed by the runtime-api warm runtime configs endpoint.
 
-    Fetches the list of available warm runtime configurations and exposes each
-    as a RemoteSandboxSpecInfo. SandboxSpecInfo.id is the container image URL so that
-    it flows correctly through RemoteSandboxService to runtime-api for pod creation
-    and warm-runtime matching. The pod security context fields (run_as_user /
+    Fetches the available warm runtime configurations and exposes each as a
+    RemoteSandboxSpecInfo. The spec ID is the durable template name; the container
+    image is stored separately so templates can share an image with different
+    resource requirements. The pod security context fields (run_as_user /
     run_as_group / fs_group) are also captured when present so RemoteSandboxService
     can pass them through to runtime-api instead of hard-coding values.
 
