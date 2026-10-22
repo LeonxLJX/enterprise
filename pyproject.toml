@@ -60,9 +60,9 @@ dependencies = [
   "memory-profiler==0.61.0",
   "numpy==2.4.4",
   "openai==2.33.0",                                 # Pin because litellm 1.84.1 requires 2.33.0 and is incompatible with >=1.100.0 (BerriAI/litellm#13711). litellm 1.94.0 allows >=2.20.0, so this pin could be relaxed but is kept for stability.
-  "openhands-agent-server==1.56.0",
-  "openhands-sdk==1.56.0",
-  "openhands-tools==1.56.0",
+  "openhands-agent-server==1.57.0",
+  "openhands-sdk==1.57.0",
+  "openhands-tools==1.57.0",
   "opentelemetry-api==1.39.1",
   "opentelemetry-exporter-otlp-proto-grpc==1.39.1",
   "orjson==3.11.8",                                 # Pinned to fix CVE-2025-67221
@@ -213,6 +213,12 @@ source = [
   "migrations",
 ]
 omit = [ "tests/*", "**/test_*" ]
+
+[tool.uv.sources]
+# Test-only: the SDK at the commit that merged OpenHands/software-agent-sdk#6145, on the rc.3 base.
+openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk", rev = "df393e38d8f1436c14414ab011386fae351c9d83", subdirectory = "openhands-sdk" }
+openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk", rev = "df393e38d8f1436c14414ab011386fae351c9d83", subdirectory = "openhands-agent-server" }
+openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk", rev = "df393e38d8f1436c14414ab011386fae351c9d83", subdirectory = "openhands-tools" }
 
 [tool.uv]
 package = false
