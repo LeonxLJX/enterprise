@@ -308,6 +308,11 @@ class AppConversationStartRequest(OpenHandsModel):
     def validate_sandbox_selection(self) -> 'AppConversationStartRequest':
         if self.sandbox_id is not None and self.sandbox_spec_id is not None:
             raise ValueError('sandbox_id and sandbox_spec_id cannot be combined')
+        if self.parent_conversation_id is not None and self.sandbox_spec_id is not None:
+            raise ValueError(
+                'sandbox_spec_id and parent_conversation_id cannot be combined; '
+                'child conversations inherit the parent sandbox'
+            )
         return self
 
     conversation_id: UUID | None = Field(default=None)

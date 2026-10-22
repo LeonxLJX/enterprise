@@ -1,8 +1,10 @@
 """Request-scoped template choices; existing sandbox metadata stays readable."""
 
 from dataclasses import dataclass
+from functools import lru_cache
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.sandbox.sandbox_spec_models import (
@@ -10,6 +12,8 @@ from openhands.app_server.sandbox.sandbox_spec_models import (
     SandboxSpecInfoPage,
 )
 from openhands.app_server.sandbox.sandbox_spec_service import SandboxSpecService
+
+ORG_TEMPLATES_ENV = 'SANDBOX_TEMPLATE_ORG_CONFIG'
 
 
 class SandboxTemplatePolicy(BaseModel):
@@ -28,6 +32,12 @@ class SandboxTemplatePolicy(BaseModel):
         if self.default_template_id not in self.template_ids:
             raise ValueError('Default template must be in template_ids')
         return self
+
+
+@lru_cache(maxsize=1)
+def parse_org_template_config(value: str) -> dict[UUID, SandboxTemplatePolicy]:
+    """Validated at app bootstrap; normal requests reuse the cached config."""
+    return TypeAdapter(dict[UUID, SandboxTemplatePolicy]).validate_json(value)
 
 
 @dataclass
@@ -58,11 +68,6 @@ class ScopedSandboxSpecService(SandboxSpecService):
         spec = await self.delegate.get_sandbox_spec(sandbox_spec_id)
         # Require stable IDs, never grant access through ambiguous image aliases.
         return spec if spec is not None and spec.id == sandbox_spec_id else None
-
-    async def batch_get_sandbox_specs(
-        self, sandbox_spec_ids: list[str]
-    ) -> list[SandboxSpecInfo | None]:
-        return [await self.get_start_sandbox_spec(id_) for id_ in sandbox_spec_ids]
 
     async def get_default_sandbox_spec(self) -> SandboxSpecInfo:
         spec = await self.get_start_sandbox_spec(self.policy.default_template_id)

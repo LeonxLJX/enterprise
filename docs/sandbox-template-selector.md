@@ -28,6 +28,9 @@ env:
 ```
 
 Replace the example organization UUIDs and template IDs with actual values.
+The application validates this value during configuration bootstrap. Invalid
+JSON, organization UUIDs, or policy fields prevent the new process from starting;
+they cannot leave it reporting readiness while requests fail later.
 The default must be in that organization's nonempty, unique `template_ids` list.
 These are stable template IDs, not free-form image URLs. The same Helm-defined
 template can be shared by multiple organizations.
@@ -37,6 +40,8 @@ feature-flag administration API can override it with organization-targeted rules
 under the same flag key. Evaluation deliberately supplies only the authenticated
 organization, so the selector rollout is organization-wide, not user-specific.
 An organization needs a Helm policy entry as well as an enabled flag to see it.
+If flag evaluation fails, the selector is disabled while the organization's
+allowlist and ordinary default launches remain available.
 
 The policy uses the request's authenticated effective organization, including the
 existing validated `X-Org-Id` and API-key binding rules. Options and new-sandbox
@@ -46,6 +51,8 @@ behavior; an enabled deployment flag alone does not display a selector for them.
 
 **Default** omits the override. An allowed saved user default is used; otherwise
 the organization default is used. It does not replace the user's saved setting.
+Keep the organization default defined in runtime-api; removing it makes default
+launches fail closed rather than selecting another organization's template.
 Changing organizations clears the pending selection and uses a separate options
 cache. Local backends and older servers without the options endpoint keep their
 existing home-page UI.
@@ -57,7 +64,8 @@ existing home-page UI.
 
 `POST /api/v1/app-conversations` accepts one new optional field,
 `sandbox_spec_id`. Existing callers omit it and continue to work. The field
-cannot be combined with `sandbox_id`; explicit choices must be enabled and
+cannot be combined with `sandbox_id` or `parent_conversation_id` (children inherit
+their parent's sandbox); explicit choices must be enabled and
 allowed for the effective organization. No image or resource overrides are
 accepted through this field.
 

@@ -73,7 +73,7 @@ async def test_org_choices_enforce_starts_without_breaking_existing_metadata():
         'testing'
     ]
     assert await org_b.get_start_sandbox_spec('large') is None
-    assert await org_b.batch_get_sandbox_specs(['large']) == [None]
+    assert (await org_b.batch_get_sandbox_specs(['large']))[0].id == 'large'
     # Old conversations may still need the original template for archival.
     assert (await org_b.get_sandbox_spec('large')).id == 'large'
     resolved = await resolve_sandbox_spec(
@@ -173,6 +173,58 @@ def test_old_requests_still_work_and_conflicting_overrides_are_rejected():
     assert AppConversationStartRequest().sandbox_spec_id is None
     with pytest.raises(ValidationError, match='cannot be combined'):
         AppConversationStartRequest(sandbox_id='existing', sandbox_spec_id='large')
+    with pytest.raises(ValidationError, match='child conversations inherit'):
+        AppConversationStartRequest(
+            parent_conversation_id=uuid4(), sandbox_spec_id='large'
+        )
+
+
+@pytest.mark.parametrize(
+    'value',
+    [
+        '{invalid json',
+        '{"not-a-uuid": {}}',
+        json.dumps(
+            {
+                '11111111-1111-4111-8111-111111111111': {
+                    'template_ids': ['standard'],
+                    'default_template_id': 'forbidden',
+                }
+            }
+        ),
+    ],
+)
+def test_invalid_org_config_rejects_app_bootstrap_before_requests(monkeypatch, value):
+    monkeypatch.setenv(ORG_TEMPLATES_ENV, value)
+    with pytest.raises(ValidationError):
+        app_config.config_from_env()
+
+
+@pytest.mark.asyncio
+async def test_flag_store_outage_keeps_org_policy_with_selector_disabled(monkeypatch):
+    org = uuid4()
+    monkeypatch.setenv(
+        ORG_TEMPLATES_ENV,
+        json.dumps(
+            {
+                str(org): {
+                    'template_ids': ['standard'],
+                    'default_template_id': 'standard',
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        feature_flag_service,
+        'is_enabled',
+        AsyncMock(side_effect=ConnectionError('unavailable')),
+    )
+    policy = await get_org_template_policy(org)
+    assert policy.selector_enabled is False
+    assert policy.template_ids == ['standard']
+    service = ScopedSandboxSpecService(scoped('standard').delegate, policy)
+    assert (await service.get_default_sandbox_spec()).id == 'standard'
+    assert await service.get_start_sandbox_spec('large') is None
 
 
 @pytest.mark.asyncio

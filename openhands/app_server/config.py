@@ -250,6 +250,15 @@ class AppServerConfig(OpenHandsModel):
 
 
 def config_from_env() -> AppServerConfig:
+    from openhands.app_server.sandbox.sandbox_template_policy import (
+        ORG_TEMPLATES_ENV,
+        parse_org_template_config,
+    )
+
+    # Reject malformed policies before the process can serve requests or pass
+    # readiness. A Helm typo must not become a delayed, deployment-wide 500.
+    parse_org_template_config(os.environ.get(ORG_TEMPLATES_ENV, '{}'))
+
     # Import defaults...
     from openhands.app_server.app_conversation.live_status_app_conversation_service import (  # noqa: E501
         LiveStatusAppConversationServiceInjector,
