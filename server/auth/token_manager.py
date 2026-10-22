@@ -44,6 +44,7 @@ from server.auth.constants import (
     KEYCLOAK_REALM_NAME,
     KEYCLOAK_SERVER_URL,
     KEYCLOAK_SERVER_URL_EXT,
+    is_oauth_v2_login_enabled,
 )
 from server.auth.email_validation import (
     extract_base_email,
@@ -51,6 +52,7 @@ from server.auth.email_validation import (
     matches_base_email,
 )
 from server.auth.keycloak_manager import get_keycloak_admin, get_keycloak_openid
+from server.auth.oauth_v2_refresh import get_oauth_v2_git_token
 from server.logger import logger
 from storage.auth_token_store import AuthTokenStore
 from storage.database import a_session_maker
@@ -619,19 +621,62 @@ class TokenManager:
             return None
 
         try:
-            offline_token = await self.load_offline_token(user_id=user_id)
-            if not offline_token:
-                logger.warning(f'No offline token found for user_id: {user_id}')
-                return None
-            return await self.get_idp_token_from_offline_token(
-                offline_token=offline_token, idp=idp
-            )
+            return await self.get_idp_token_for_user(user_id, idp)
         except KeycloakConnectionError:
             logger.exception(
                 f'KeycloakConnectionError when getting IDP token for IDP user_id {idp_user_id}',
                 stack_info=True,
             )
             raise
+
+    async def get_idp_token_for_user(
+        self, user_id: str, idp: ProviderType, rejected: str | None = None
+    ) -> str | None:
+        """Git token for background work done without the user's session.
+
+        With ``ENABLE_OAUTH_V2_LOGIN`` on, ``oauth_tokens`` wins over the
+        Keycloak offline session. With it off, only the Keycloak offline
+        session is read. Installs without Keycloak store no offline tokens, so
+        the fallback returns ``None`` without a Keycloak call.
+
+        ``rejected`` is a token the provider just refused. An ``oauth_tokens``
+        token equal to it is skipped: a copy of a Keycloak grant is revoked when
+        the Keycloak side refreshes, while its stored expiry is still ahead.
+        """
+        if is_oauth_v2_login_enabled():
+            token = await self._get_oauth_v2_git_token(user_id, idp, rejected)
+            if token:
+                return token
+
+        offline_token = await self.load_offline_token(user_id=user_id)
+        if not offline_token:
+            logger.warning(f'No offline token found for user_id: {user_id}')
+            return None
+        return await self.get_idp_token_from_offline_token(
+            offline_token=offline_token, idp=idp
+        )
+
+    async def _get_oauth_v2_git_token(
+        self, user_id: str, idp: ProviderType, rejected: str | None
+    ) -> str | None:
+        try:
+            token = await get_oauth_v2_git_token(user_id, idp)
+        except Exception:
+            # Unlike the signed-in path, keep the token row: the failure may be
+            # transient and there is no user here to re-link.
+            logger.warning(
+                'oauth_v2_git_token_unavailable',
+                extra={'user_id': user_id, 'provider': idp.value},
+                exc_info=True,
+            )
+            return None
+        if token and token == rejected:
+            logger.warning(
+                'oauth_v2_git_token_rejected',
+                extra={'user_id': user_id, 'provider': idp.value},
+            )
+            return None
+        return token
 
     async def get_user_id_from_idp_user_id(
         self, idp_user_id: str, idp: ProviderType
