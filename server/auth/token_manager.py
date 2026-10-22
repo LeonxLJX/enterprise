@@ -54,6 +54,7 @@ from server.auth.email_validation import (
 from server.auth.keycloak_manager import get_keycloak_admin, get_keycloak_openid
 from server.auth.oauth_v2_refresh import get_oauth_v2_git_token
 from server.logger import logger
+from storage.auth_provider_user_store import AuthProviderUserStore
 from storage.auth_token_store import AuthTokenStore
 from storage.database import a_session_maker
 from storage.github_app_installation import GithubAppInstallation
@@ -678,9 +679,34 @@ class TokenManager:
             return None
         return token
 
+    async def _get_user_id_from_git_link(
+        self, idp_user_id: str, idp: ProviderType
+    ) -> str | None:
+        """The user who linked this git account through OAuth v2, if exactly one."""
+        # Webhook payloads can carry the id as an int; the column is text.
+        user_ids = await AuthProviderUserStore().get_git_user_ids(
+            idp.value, str(idp_user_id)
+        )
+        if len(user_ids) > 1:
+            # Never pick one: the job would run with another user's token.
+            logger.warning(
+                'oauth_v2_git_account_linked_to_several_users',
+                extra={'provider': idp.value, 'idp_user_id': str(idp_user_id)},
+            )
+            return None
+        return str(next(iter(user_ids))) if user_ids else None
+
     async def get_user_id_from_idp_user_id(
         self, idp_user_id: str, idp: ProviderType
     ) -> str | None:
+        if is_oauth_v2_login_enabled():
+            user_id = await self._get_user_id_from_git_link(idp_user_id, idp)
+            if user_id:
+                return user_id
+        if not KEYCLOAK_SERVER_URL:
+            logger.info(f'{idp.value} user with IDP ID {idp_user_id} not linked.')
+            return None
+
         keycloak_admin = get_keycloak_admin(self.external)
         users = await keycloak_admin.a_get_users({'q': f'{idp.value}_id:{idp_user_id}'})
         if not users:
