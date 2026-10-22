@@ -39,6 +39,7 @@ from server.auth.authorization import (
 from server.auth.constants import (
     BITBUCKET_DATA_CENTER_HOST,
     ENABLE_SUPER_ADMIN,
+    GITLAB_HOST,
     is_oauth_v2_login_enabled,
 )
 from server.auth.cookie_chunking import read_chunked_cookie
@@ -69,6 +70,24 @@ def _is_transient_keycloak_error(exc: BaseException) -> bool:
             return False
         exc = retry_exc
     return isinstance(exc, KeycloakConnectionError)
+
+
+def _idp_token_host(idp_type: ProviderType, host: str | None) -> str | None:
+    """The host an IdP-sourced git token belongs to.
+
+    A host the user stored with their own token wins. Otherwise the install's
+    deployment-wide host is used, so the frontend addresses repositories on it.
+    GitLab always gets one (``gitlab.com`` included): the same provider name
+    covers the hosted service and self-managed instances, so a missing host
+    would read as the hosted service.
+    """
+    if host:
+        return host
+    if idp_type == ProviderType.BITBUCKET_DATA_CENTER:
+        return BITBUCKET_DATA_CENTER_HOST or None
+    if idp_type == ProviderType.GITLAB:
+        return GITLAB_HOST or None
+    return None
 
 
 @dataclass
@@ -842,8 +861,7 @@ class SaasUserAuth(UserAuth):
                     host = None
                     if user_secrets and idp_type in user_secrets.provider_tokens:
                         host = user_secrets.provider_tokens[idp_type].host
-                    if idp_type == ProviderType.BITBUCKET_DATA_CENTER and not host:
-                        host = BITBUCKET_DATA_CENTER_HOST or None
+                    host = _idp_token_host(idp_type, host)
 
                     token = await store.get_valid_access_token(
                         permitted_drift_seconds=get_permitted_drift_seconds(provider),
@@ -917,8 +935,7 @@ class SaasUserAuth(UserAuth):
             host = None
             if user_secrets and idp_type in user_secrets.provider_tokens:
                 host = user_secrets.provider_tokens[idp_type].host
-            if idp_type == ProviderType.BITBUCKET_DATA_CENTER and not host:
-                host = BITBUCKET_DATA_CENTER_HOST or None
+            host = _idp_token_host(idp_type, host)
             provider_tokens[idp_type] = ProviderToken(
                 token=SecretStr(token), user_id=None, host=host
             )
@@ -964,8 +981,7 @@ class SaasUserAuth(UserAuth):
                     if user_secrets and idp_type in user_secrets.provider_tokens:
                         host = user_secrets.provider_tokens[idp_type].host
 
-                    if idp_type == ProviderType.BITBUCKET_DATA_CENTER and not host:
-                        host = BITBUCKET_DATA_CENTER_HOST or None
+                    host = _idp_token_host(idp_type, host)
 
                     # Resolve the provider token by user_id directly. This reads
                     # the encrypted token from the auth_tokens table and refreshes
