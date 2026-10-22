@@ -31,6 +31,7 @@ export default [
       route("condenser", "routes/condenser-settings.tsx"),
       route("verification", "routes/verification-settings.tsx"),
       route("org-defaults", "routes/org-default-llm-settings.tsx"),
+      route("document/:sectionKey", "routes/settings-document.tsx"),
       route(
         "org-defaults/condenser",
         "routes/org-default-condenser-settings.tsx",

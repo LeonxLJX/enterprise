@@ -32,6 +32,32 @@ function deepMerge(
   return result;
 }
 
+const CANONICAL_SETTINGS_DEMO_URL = "http://127.0.0.1:3000/api/settings";
+
+async function proxyCanonicalSettings(
+  request: Request,
+  path: "/document" | "/document-schema",
+) {
+  const incomingUrl = new URL(request.url);
+  const upstreamUrl = new URL(`${CANONICAL_SETTINGS_DEMO_URL}${path}`);
+  upstreamUrl.search = incomingUrl.search;
+  const response = await fetch(upstreamUrl, {
+    method: request.method,
+    headers:
+      request.method === "PATCH"
+        ? { "Content-Type": "application/json" }
+        : undefined,
+    body: request.method === "PATCH" ? await request.text() : undefined,
+  });
+  return new HttpResponse(response.body, {
+    status: response.status,
+    headers: {
+      "Content-Type":
+        response.headers.get("Content-Type") ?? "application/json",
+    },
+  });
+}
+
 const DEFAULT_AGENT_SETTINGS = DEFAULT_SETTINGS.agent_settings ?? {};
 const llmDefaults = (DEFAULT_AGENT_SETTINGS as Record<string, unknown>).llm as
   | Record<string, unknown>
@@ -683,6 +709,18 @@ export const SETTINGS_HANDLERS = [
       ],
       next_page_id: null,
     }),
+  ),
+
+  http.get("/api/v1/settings/document-schema", ({ request }) =>
+    proxyCanonicalSettings(request, "/document-schema"),
+  ),
+
+  http.get("/api/v1/settings/document", ({ request }) =>
+    proxyCanonicalSettings(request, "/document"),
+  ),
+
+  http.patch("/api/v1/settings/document", ({ request }) =>
+    proxyCanonicalSettings(request, "/document"),
   ),
 
   http.get("/api/v1/settings/conversation-schema", async () => {

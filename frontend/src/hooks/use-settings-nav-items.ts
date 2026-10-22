@@ -1,4 +1,7 @@
+import { createElement } from "react";
+import { SlidersHorizontal } from "lucide-react";
 import { useConfig } from "#/hooks/query/use-config";
+import { useSettingsDocumentSchema } from "#/hooks/query/use-settings-document";
 import {
   SAAS_NAV_ITEMS,
   OSS_NAV_ITEMS,
@@ -20,6 +23,10 @@ import { useSettings } from "./query/use-settings";
 import { useQuotaStatus } from "./query/use-quota-status";
 import { useIsSuperAdmin } from "./query/use-is-super-admin";
 import { I18nKey } from "#/i18n/declaration";
+import {
+  getDynamicSettingsSections,
+  getSettingsDocumentSectionPath,
+} from "#/utils/settings-document-pages";
 
 // Rendered navigation item types
 export type SettingsNavRenderedItem =
@@ -55,6 +62,7 @@ export function useSettingsNavItems(): SettingsNavRenderedItem[] {
   const { data: config } = useConfig();
   const { data: user } = useMe();
   const { data: settings } = useSettings();
+  const { data: settingsDocumentSchema } = useSettingsDocumentSchema();
   const isSaasMode = config?.app_mode === "saas";
   const { data: quota } = useQuotaStatus({ enabled: isSaasMode });
   const userRole: OrganizationUserRole = user?.role ?? "member";
@@ -80,6 +88,31 @@ export function useSettingsNavItems(): SettingsNavRenderedItem[] {
     : null;
 
   let items = isSaasMode ? [...SAAS_NAV_ITEMS] : [...OSS_NAV_ITEMS];
+
+  if (isSaasMode && isTeamOrg && organizationId) {
+    const dynamicItems: SettingsNavItem[] = getDynamicSettingsSections(
+      settingsDocumentSchema,
+    ).map((section) => ({
+      icon: createElement(SlidersHorizontal, {
+        className: "size-4",
+        "aria-hidden": true,
+      }),
+      to: getSettingsDocumentSectionPath(section.key),
+      text: section.label,
+      subtitle: "",
+      section: "org",
+      isSchemaDefined: true,
+    }));
+    const personalIndex = items.findIndex((item) => item.section !== "org");
+    items =
+      personalIndex === -1
+        ? [...items, ...dynamicItems]
+        : [
+            ...items.slice(0, personalIndex),
+            ...dynamicItems,
+            ...items.slice(personalIndex),
+          ];
+  }
 
   // First apply feature flag-based hiding
   items = items.filter((item) => !isSettingsPageHidden(item.to, featureFlags));

@@ -126,6 +126,7 @@ async def test_document_patch_preserves_sparse_member_hierarchy(
     from sqlalchemy import select
 
     from storage.org_member import OrgMember
+    from storage.role import Role
     from storage.user import User
 
     fixture = org_with_multiple_members_fixture
@@ -134,12 +135,15 @@ async def test_document_patch_preserves_sparse_member_hierarchy(
     org_id = fixture['org_id']
 
     with session_maker() as session:
+        admin_role = Role(id=11, name='admin', rank=2)
+        session.add(admin_role)
         admin_member = session.execute(
             select(OrgMember).where(
                 OrgMember.org_id == org_id,
                 OrgMember.user_id == admin_user_id,
             )
         ).scalar_one()
+        admin_member.role = admin_role
         admin_member.conversation_settings_diff = {
             **admin_member.conversation_settings_diff,
             'max_iterations': 33,
@@ -165,6 +169,7 @@ async def test_document_patch_preserves_sparse_member_hierarchy(
                     'max_iterations': None,
                     'security_analyzer': 'llm',
                 },
+                'product_settings_diff': {'prototype_banner': 'compact'},
                 'language': 'fr',
             },
             effective,
@@ -190,8 +195,213 @@ async def test_document_patch_preserves_sparse_member_hierarchy(
     assert 'max_iterations' not in admin_after.conversation_settings_diff
     assert admin_after.conversation_settings_diff['confirmation_mode'] is True
     assert admin_after.conversation_settings_diff['security_analyzer'] == 'llm'
+    assert admin_after.conversation_settings_diff['__product_settings__'] == {
+        'prototype_banner': 'compact'
+    }
     assert other_after.conversation_settings_diff == other_before
     assert user.language == 'fr'
+
+    with (
+        patch('storage.saas_settings_store.a_session_maker', async_session_maker),
+        patch('storage.user_store.a_session_maker', async_session_maker),
+        patch('storage.org_store.a_session_maker', async_session_maker),
+    ):
+        loaded = await SaasSettingsStore(str(admin_user_id)).load()
+
+    assert loaded is not None
+    assert getattr(loaded, '_product_settings_document') == {
+        'prototype_banner': 'compact'
+    }
+
+    with patch('storage.saas_settings_store.a_session_maker', async_session_maker):
+        admin_store = SaasSettingsStore(str(admin_user_id))
+        await admin_store.store_document_patch(
+            {
+                'agent_settings_diff': {'condenser': {'enabled': False}},
+                'conversation_settings_diff': {'max_iterations': 88},
+                'product_settings_diff': {'prototype_banner': 'expanded'},
+            },
+            effective,
+            scope='organization',
+        )
+        org_product = await admin_store.load_document_product('organization')
+        personal_product = await admin_store.load_document_product('personal')
+
+    assert org_product == {'prototype_banner': 'expanded'}
+    assert personal_product == {'prototype_banner': 'compact'}
+
+    with (
+        patch('storage.saas_settings_store.a_session_maker', async_session_maker),
+        patch('storage.user_store.a_session_maker', async_session_maker),
+        patch('storage.org_store.a_session_maker', async_session_maker),
+    ):
+        admin_effective = await SaasSettingsStore(str(admin_user_id)).load()
+        member_effective = await SaasSettingsStore(str(member_user_id)).load()
+
+    assert admin_effective is not None
+    assert member_effective is not None
+    assert _agent_value(admin_effective, 'condenser.enabled') is False
+    assert admin_effective.conversation_settings.max_iterations == 88
+    assert getattr(admin_effective, '_product_settings_document') == {
+        'prototype_banner': 'compact'
+    }
+    assert getattr(member_effective, '_product_settings_document') == {
+        'prototype_banner': 'expanded'
+    }
+
+    with patch('storage.saas_settings_store.a_session_maker', async_session_maker):
+        await SaasSettingsStore(str(admin_user_id)).store_document_patch(
+            {'product_settings_diff': {'prototype_banner': None}},
+            effective,
+        )
+
+    with session_maker() as session:
+        cleared_member = session.execute(
+            select(OrgMember).where(
+                OrgMember.org_id == org_id,
+                OrgMember.user_id == admin_user_id,
+            )
+        ).scalar_one()
+
+    assert '__product_settings__' not in cleared_member.conversation_settings_diff
+    assert cleared_member.conversation_settings_diff['confirmation_mode'] is True
+
+    with (
+        patch('storage.saas_settings_store.a_session_maker', async_session_maker),
+        patch('storage.user_store.a_session_maker', async_session_maker),
+        patch('storage.org_store.a_session_maker', async_session_maker),
+    ):
+        cleared = await SaasSettingsStore(str(admin_user_id)).load()
+
+    assert cleared is not None
+    assert getattr(cleared, '_product_settings_document') == {
+        'prototype_banner': 'expanded'
+    }
+
+
+@pytest.mark.asyncio
+async def test_document_patch_honors_locked_rules_for_every_settings_section(
+    session_maker, async_session_maker, org_with_multiple_members_fixture
+):
+    from sqlalchemy import select
+
+    from storage.org import Org
+    from storage.org_member import OrgMember
+    from storage.saas_settings_store import _settings_section_by_field_path
+
+    fixture = org_with_multiple_members_fixture
+    member_user_id = fixture['member1_user_id']
+    org_id = fixture['org_id']
+    field_sections = _settings_section_by_field_path()
+    field_sections['product.prototype_banner'] = 'product.prototype'
+
+    with session_maker() as session:
+        org = session.execute(select(Org).where(Org.id == org_id)).scalar_one()
+        org.configuration_policy = {
+            'llm': {'operation': 'extend'},
+            'settings': {
+                'product.prototype': {'operation': 'locked'},
+                'agent.condenser': {'operation': 'locked'},
+                'conversation.general': {'operation': 'locked'},
+            },
+        }
+        org.agent_settings = {
+            **org.agent_settings,
+            'condenser': {'enabled': True, 'max_size': 240},
+        }
+        org.conversation_settings = {
+            **org.conversation_settings,
+            'max_iterations': 300,
+            '__product_settings__': {'prototype_banner': 'expanded'},
+        }
+        session.commit()
+
+    with (
+        patch('storage.saas_settings_store.a_session_maker', async_session_maker),
+        patch(
+            'storage.saas_settings_store._settings_section_by_field_path',
+            return_value=field_sections,
+        ),
+    ):
+        await SaasSettingsStore(str(member_user_id)).store_document_patch(
+            {
+                'agent_settings_diff': {'condenser': {'enabled': False}},
+                'conversation_settings_diff': {'max_iterations': 1},
+                'product_settings_diff': {'prototype_banner': 'compact'},
+            },
+            Settings(),
+        )
+
+    with session_maker() as session:
+        member = session.execute(
+            select(OrgMember).where(
+                OrgMember.org_id == org_id,
+                OrgMember.user_id == member_user_id,
+            )
+        ).scalar_one()
+
+    assert 'condenser' not in member.agent_settings_diff
+    assert member.conversation_settings_diff['max_iterations'] == 20
+    assert '__product_settings__' not in member.conversation_settings_diff
+
+    with (
+        patch('storage.saas_settings_store.a_session_maker', async_session_maker),
+        patch('storage.user_store.a_session_maker', async_session_maker),
+        patch('storage.org_store.a_session_maker', async_session_maker),
+        patch(
+            'storage.saas_settings_store._settings_section_by_field_path',
+            return_value=field_sections,
+        ),
+    ):
+        effective = await SaasSettingsStore(str(member_user_id)).load()
+
+    assert effective is not None
+    assert _agent_value(effective, 'condenser.enabled') is True
+    assert effective.conversation_settings.max_iterations == 300
+    assert getattr(effective, '_product_settings_document') == {
+        'prototype_banner': 'expanded'
+    }
+
+
+@pytest.mark.parametrize(
+    ('operation', 'expected'),
+    [
+        ('extend', {'prototype_banner': 'compact', 'prototype_enabled': True}),
+        ('replace', {'prototype_banner': 'compact'}),
+        ('subset', {'prototype_banner': 'expanded', 'prototype_enabled': True}),
+        ('locked', {'prototype_banner': 'expanded', 'prototype_enabled': True}),
+    ],
+)
+def test_canonical_section_composition_honors_all_hierarchy_operations(
+    operation, expected
+):
+    from types import SimpleNamespace
+
+    from storage.saas_settings_store import _compose_settings_layer
+
+    org = SimpleNamespace(
+        configuration_policy={
+            'llm': {'operation': 'extend'},
+            'settings': {'product.prototype': {'operation': operation}},
+        }
+    )
+    field_sections = {
+        'product.prototype_banner': 'product.prototype',
+        'product.prototype_enabled': 'product.prototype',
+    }
+    with patch(
+        'storage.saas_settings_store._settings_section_by_field_path',
+        return_value=field_sections,
+    ):
+        composed = _compose_settings_layer(
+            org,
+            'member',
+            'product',
+            {'prototype_banner': 'expanded', 'prototype_enabled': True},
+            {'prototype_banner': 'compact'},
+        )
+
+    assert composed == expected
 
 
 def test_member_settings_persist_full_effective_agent_settings():

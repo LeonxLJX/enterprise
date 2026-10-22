@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -28,6 +29,7 @@ from openhands.sdk.llm.utils.openhands_provider import (
 )
 from openhands.sdk.mcp.config import MCPServer
 from openhands.sdk.profiles import resolve_agent_profile
+from openhands.sdk.settings import export_settings_document_schema
 from openhands.sdk.tool.defaults import drop_retired_tool_switches
 from server.auth.token_manager import TokenManager
 from server.constants import (
@@ -178,6 +180,7 @@ _ORG_OWNED_SETTINGS_KEYS = frozenset(
 
 _MISSING = object()
 _ADMIN_ROLE_NAMES = {'admin', 'owner'}
+_PRODUCT_SETTINGS_DIFF_KEY = '__product_settings__'
 
 
 def _without_matching_values(
@@ -199,6 +202,135 @@ def _llm_operation(org: Org, role_name: str | None) -> ConfigurationOperation:
     if role_name in _ADMIN_ROLE_NAMES:
         return ConfigurationOperation.REPLACE
     return load_configuration_policy(org.configuration_policy).llm.operation
+
+
+def _settings_section_by_field_path() -> dict[str, str]:
+    schema = export_settings_document_schema()
+    return {
+        field.key: section.key
+        for section in schema.sections
+        for field in section.fields
+    }
+
+
+def _settings_operation(
+    org: Org,
+    role_name: str | None,
+    section_key: str,
+) -> ConfigurationOperation:
+    if role_name in _ADMIN_ROLE_NAMES:
+        return ConfigurationOperation.REPLACE
+    return load_configuration_policy(
+        org.configuration_policy
+    ).operation_for_settings_section(section_key)
+
+
+def _member_can_write_settings_path(
+    org: Org,
+    role_name: str | None,
+    path: str,
+) -> bool:
+    section_key = _settings_section_by_field_path().get(path)
+    if section_key is None:
+        return True
+    return _settings_operation(org, role_name, section_key) in {
+        ConfigurationOperation.REPLACE,
+        ConfigurationOperation.EXTEND,
+    }
+
+
+def _filter_member_document_patch(
+    org: Org,
+    role_name: str | None,
+    prefix: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    field_sections = _settings_section_by_field_path()
+
+    def filter_level(value: dict[str, Any], path: str) -> dict[str, Any]:
+        filtered: dict[str, Any] = {}
+        for key, child in value.items():
+            child_path = f'{path}.{key}'
+            section_key = field_sections.get(child_path)
+            if section_key is not None:
+                if _settings_operation(org, role_name, section_key) in {
+                    ConfigurationOperation.REPLACE,
+                    ConfigurationOperation.EXTEND,
+                }:
+                    filtered[key] = child
+            elif isinstance(child, dict):
+                nested = filter_level(child, child_path)
+                if nested:
+                    filtered[key] = nested
+            else:
+                filtered[key] = child
+        return filtered
+
+    return filter_level(patch, prefix)
+
+
+def _relative_settings_path(root: str, field_path: str) -> str:
+    prefix = f'{root}.'
+    return field_path[len(prefix) :] if field_path.startswith(prefix) else field_path
+
+
+def _dotted_value(values: dict[str, Any], field_path: str) -> Any:
+    current: Any = values
+    for part in field_path.split('.'):
+        if not isinstance(current, dict) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def _delete_dotted_value(values: dict[str, Any], field_path: str) -> None:
+    parts = field_path.split('.')
+    current = values
+    parents: list[tuple[dict[str, Any], str]] = []
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            return
+        parents.append((current, part))
+        current = child
+    current.pop(parts[-1], None)
+    for parent, key in reversed(parents):
+        child = parent.get(key)
+        if isinstance(child, dict) and not child:
+            parent.pop(key, None)
+
+
+def _compose_settings_layer(
+    org: Org,
+    role_name: str | None,
+    root: str,
+    org_values: dict[str, Any],
+    member_values: dict[str, Any],
+) -> dict[str, Any]:
+    filtered_member = _filter_member_document_patch(org, role_name, root, member_values)
+    inherited = deepcopy(org_values)
+    field_sections = _settings_section_by_field_path()
+    replace_sections = {
+        section_key
+        for field_path, section_key in field_sections.items()
+        if field_path.startswith(f'{root}.')
+        and _settings_operation(org, role_name, section_key)
+        == ConfigurationOperation.REPLACE
+    }
+    for section_key in replace_sections:
+        section_paths = [
+            _relative_settings_path(root, field_path)
+            for field_path, field_section in field_sections.items()
+            if field_section == section_key and field_path.startswith(f'{root}.')
+        ]
+        if not any(
+            _dotted_value(filtered_member, field_path) is not _MISSING
+            for field_path in section_paths
+        ):
+            continue
+        for field_path in section_paths:
+            _delete_dotted_value(inherited, field_path)
+    return deep_merge(inherited, filtered_member)
 
 
 @dataclass
@@ -517,6 +649,12 @@ class SaasSettingsStore(SettingsStore):
             dict(org_member.agent_settings_diff)
         )
         member_agent_settings_diff.pop('mcp_config', None)
+        member_agent_settings_diff = _filter_member_document_patch(
+            org,
+            role_name,
+            'agent',
+            member_agent_settings_diff,
+        )
         if llm_operation in {
             ConfigurationOperation.LOCKED,
             ConfigurationOperation.SUBSET,
@@ -524,23 +662,28 @@ class SaasSettingsStore(SettingsStore):
             member_agent_settings_diff.pop('llm', None)
         member_mcp_config = org_member.effective_mcp_config
 
-        kwargs = {
-            **{
-                normalized: getattr(org, c.name)
-                for c in Org.__table__.columns
-                if (
-                    normalized := c.name.removeprefix('_default_')
-                    .removeprefix('default_')
-                    .lstrip('_')
-                )
-                in Settings.model_fields
-            },
-            **{
-                normalized: getattr(user, c.name)
-                for c in User.__table__.columns
-                if (normalized := c.name.lstrip('_')) in Settings.model_fields
-            },
+        org_kwargs = {
+            normalized: getattr(org, c.name)
+            for c in Org.__table__.columns
+            if (
+                normalized := c.name.removeprefix('_default_')
+                .removeprefix('default_')
+                .lstrip('_')
+            )
+            in Settings.model_fields
         }
+        member_kwargs = {
+            normalized: getattr(user, c.name)
+            for c in User.__table__.columns
+            if (normalized := c.name.lstrip('_')) in Settings.model_fields
+        }
+        kwargs = _compose_settings_layer(
+            org,
+            role_name,
+            'product',
+            org_kwargs,
+            member_kwargs,
+        )
         kwargs['title_llm_profile'] = org_member.title_llm_profile
         # Drop member-private keys from the org dump before merging so
         # legacy org-level values (older code paths broadcast mcp_config)
@@ -549,7 +692,10 @@ class SaasSettingsStore(SettingsStore):
         org_agent_settings_dump = org_agent_settings.model_dump(mode='json')
         for private_key in MEMBER_PRIVATE_AGENT_KEYS:
             org_agent_settings_dump.pop(private_key, None)
-        merged_agent_settings = deep_merge(
+        merged_agent_settings = _compose_settings_layer(
+            org,
+            role_name,
+            'agent',
             org_agent_settings_dump,
             member_agent_settings_diff,
         )
@@ -627,9 +773,42 @@ class SaasSettingsStore(SettingsStore):
             )
 
         kwargs['agent_settings'] = merged_agent_settings
+        org_conversation_payload = dict(org.conversation_settings or {})
+        org_product_settings = org_conversation_payload.pop(
+            _PRODUCT_SETTINGS_DIFF_KEY, {}
+        )
+        if not isinstance(org_product_settings, dict):
+            org_product_settings = {}
         org_conversation = OrgStore.get_conversation_settings_from_org(org)
         member_conversation_diff = dict(org_member.conversation_settings_diff)
-        kwargs['conversation_settings'] = deep_merge(
+        member_product_settings = member_conversation_diff.pop(
+            _PRODUCT_SETTINGS_DIFF_KEY, {}
+        )
+        if not isinstance(member_product_settings, dict):
+            member_product_settings = {}
+        member_product_settings = _filter_member_document_patch(
+            org,
+            role_name,
+            'product',
+            member_product_settings,
+        )
+        member_conversation_diff = _filter_member_document_patch(
+            org,
+            role_name,
+            'conversation',
+            member_conversation_diff,
+        )
+        effective_product_settings = _compose_settings_layer(
+            org,
+            role_name,
+            'product',
+            org_product_settings,
+            member_product_settings,
+        )
+        kwargs['conversation_settings'] = _compose_settings_layer(
+            org,
+            role_name,
+            'conversation',
             org_conversation.model_dump(mode='json'),
             member_conversation_diff,
         )
@@ -740,15 +919,20 @@ class SaasSettingsStore(SettingsStore):
             openhands_default_model_name = await get_openhands_default_model_name(
                 session
             )
+        persist_direct_default = seeded_default and should_use_direct_llm_defaults()
         persist_seeded_org_default = (
             seeded_default
             and openhands_default_model_name is None
-            and llm_operation
-            in {ConfigurationOperation.LOCKED, ConfigurationOperation.SUBSET}
+            and (
+                persist_direct_default
+                or llm_operation
+                in {ConfigurationOperation.LOCKED, ConfigurationOperation.SUBSET}
+            )
         )
         persist_seeded_member_default = (
             seeded_default
             and openhands_default_model_name is None
+            and not persist_direct_default
             and llm_operation
             in {ConfigurationOperation.REPLACE, ConfigurationOperation.EXTEND}
         )
@@ -822,6 +1006,9 @@ class SaasSettingsStore(SettingsStore):
             agent_settings_payload.pop('llm', None)
 
         settings = Settings(**kwargs)
+        object.__setattr__(
+            settings, '_product_settings_document', effective_product_settings
+        )
         settings._mcp_config_updated = False
         if resolution_requested:
             # Launch view (even when resolution fell back): never persistable.
@@ -886,20 +1073,66 @@ class SaasSettingsStore(SettingsStore):
             org.llm_profiles = serialized
             await session.commit()
 
+    async def load_document_product(
+        self,
+        scope: str = 'effective',
+    ) -> dict[str, Any]:
+        if scope == 'effective':
+            settings = await self.load()
+            if settings is None:
+                return {}
+            product = getattr(settings, '_product_settings_document', {})
+            return dict(product) if isinstance(product, dict) else {}
+        if scope not in {'organization', 'personal'}:
+            raise ValueError(f'Unsupported settings document scope: {scope}')
+
+        async with a_session_maker() as session:
+            result = await session.execute(
+                select(User)
+                .options(joinedload(User.org_members).joinedload(OrgMember.role))
+                .filter(User.id == uuid.UUID(self.user_id))
+            )
+            user = result.scalars().first()
+            if user is None:
+                raise ValueError(f'User not found for ID {self.user_id}')
+            org_id = self._resolve_org_id(user)
+            org_member = next(
+                (member for member in user.org_members if member.org_id == org_id),
+                None,
+            )
+            if org_member is None:
+                raise ValueError(f'User {self.user_id} is not a member of org {org_id}')
+            if scope == 'personal':
+                product = dict(org_member.conversation_settings_diff or {}).get(
+                    _PRODUCT_SETTINGS_DIFF_KEY, {}
+                )
+                return dict(product) if isinstance(product, dict) else {}
+            if self._get_role_name(org_member) not in _ADMIN_ROLE_NAMES:
+                raise PermissionError('Organization settings require an admin role')
+            org = await session.get(Org, org_id)
+            if org is None:
+                raise ValueError(f'Organization not found for ID {org_id}')
+            product = dict(org.conversation_settings or {}).get(
+                _PRODUCT_SETTINGS_DIFF_KEY, {}
+            )
+            return dict(product) if isinstance(product, dict) else {}
+
     async def store_document_patch(
         self,
         payload: dict[str, Any],
         effective_settings: Settings,
+        *,
+        scope: str = 'personal',
     ) -> None:
         """Persist only fields present in a canonical document patch.
 
-        Agent and conversation values remain sparse member overrides. Explicit
-        ``None`` removes an override so the organization default becomes effective.
+        Personal values remain sparse member overrides. Organization product
+        values are stored as sparse defaults. ``None`` clears the selected layer.
         """
         async with a_session_maker() as session:
             result = await session.execute(
                 select(User)
-                .options(joinedload(User.org_members))
+                .options(joinedload(User.org_members).joinedload(OrgMember.role))
                 .filter(User.id == uuid.UUID(self.user_id))
             )
             user = result.scalars().first()
@@ -913,28 +1146,137 @@ class SaasSettingsStore(SettingsStore):
             )
             if org_member is None:
                 raise ValueError(f'User {self.user_id} is not a member of org {org_id}')
+            org = await session.get(Org, org_id)
+            if org is None:
+                raise ValueError(f'Organization not found for ID {org_id}')
+            role_name = self._get_role_name(org_member)
+
+            if scope not in {'personal', 'organization'}:
+                raise ValueError(f'Unsupported settings document scope: {scope}')
+            if scope == 'organization':
+                if role_name not in _ADMIN_ROLE_NAMES:
+                    raise PermissionError('Organization settings require an admin role')
+
+                agent_patch = payload.get('agent_settings_diff')
+                if isinstance(agent_patch, dict):
+                    agent_patch = {
+                        key: value
+                        for key, value in agent_patch.items()
+                        if key not in MEMBER_PRIVATE_AGENT_KEYS
+                    }
+                    org.agent_settings = deep_merge(
+                        dict(org.agent_settings or {}), agent_patch
+                    )
+
+                conversation_settings = dict(org.conversation_settings or {})
+                conversation_patch = payload.get('conversation_settings_diff')
+                if isinstance(conversation_patch, dict):
+                    conversation_settings = deep_merge(
+                        conversation_settings, conversation_patch
+                    )
+
+                product_patch = payload.get('product_settings_diff')
+                if isinstance(product_patch, dict):
+                    product_settings = dict(
+                        conversation_settings.get(_PRODUCT_SETTINGS_DIFF_KEY, {})
+                    )
+                    product_settings = deep_merge(product_settings, product_patch)
+                    if product_settings:
+                        conversation_settings[_PRODUCT_SETTINGS_DIFF_KEY] = (
+                            product_settings
+                        )
+                    else:
+                        conversation_settings.pop(_PRODUCT_SETTINGS_DIFF_KEY, None)
+                org.conversation_settings = conversation_settings
+
+                org_columns = {
+                    normalized: column.name
+                    for column in Org.__table__.columns
+                    if (
+                        normalized := column.name.removeprefix('_default_')
+                        .removeprefix('default_')
+                        .lstrip('_')
+                    )
+                    in Settings.model_fields
+                }
+                for key, value in payload.items():
+                    if key in {
+                        'agent_settings_diff',
+                        'conversation_settings_diff',
+                        'product_settings_diff',
+                    }:
+                        continue
+                    column_name = org_columns.get(key)
+                    if column_name is not None:
+                        setattr(org, column_name, value)
+                await session.commit()
+                return
 
             agent_patch = payload.get('agent_settings_diff')
             if isinstance(agent_patch, dict):
                 agent_patch = {
                     key: value
-                    for key, value in agent_patch.items()
+                    for key, value in _filter_member_document_patch(
+                        org,
+                        role_name,
+                        'agent',
+                        agent_patch,
+                    ).items()
                     if key not in MEMBER_PRIVATE_AGENT_KEYS
                 }
-                org_member.agent_settings_diff = deep_merge(
+                member_agent_settings = deep_merge(
                     dict(org_member.agent_settings_diff),
                     agent_patch,
                 )
+                if _llm_operation(org, role_name) in {
+                    ConfigurationOperation.LOCKED,
+                    ConfigurationOperation.SUBSET,
+                }:
+                    member_agent_settings.pop('llm', None)
+                org_member.agent_settings_diff = member_agent_settings
 
             conversation_patch = payload.get('conversation_settings_diff')
             if isinstance(conversation_patch, dict):
+                conversation_patch = _filter_member_document_patch(
+                    org,
+                    role_name,
+                    'conversation',
+                    conversation_patch,
+                )
                 org_member.conversation_settings_diff = deep_merge(
                     dict(org_member.conversation_settings_diff),
                     conversation_patch,
                 )
 
+            product_patch = payload.get('product_settings_diff')
+            if isinstance(product_patch, dict):
+                product_patch = _filter_member_document_patch(
+                    org,
+                    role_name,
+                    'product',
+                    product_patch,
+                )
+                conversation_diff = dict(org_member.conversation_settings_diff)
+                product_diff = dict(
+                    conversation_diff.get(_PRODUCT_SETTINGS_DIFF_KEY, {})
+                )
+                product_diff = deep_merge(product_diff, product_patch)
+                if product_diff:
+                    conversation_diff[_PRODUCT_SETTINGS_DIFF_KEY] = product_diff
+                else:
+                    conversation_diff.pop(_PRODUCT_SETTINGS_DIFF_KEY, None)
+                org_member.conversation_settings_diff = conversation_diff
+
             for key in payload:
-                if key in ('agent_settings_diff', 'conversation_settings_diff'):
+                if key in {
+                    'agent_settings_diff',
+                    'conversation_settings_diff',
+                    'product_settings_diff',
+                }:
+                    continue
+                if not _member_can_write_settings_path(
+                    org, role_name, f'product.{key}'
+                ):
                     continue
                 value = getattr(effective_settings, key)
                 if hasattr(user, key):
@@ -1031,7 +1373,8 @@ class SaasSettingsStore(SettingsStore):
                 )
                 return None
 
-            llm_operation = _llm_operation(org, self._get_role_name(org_member))
+            role_name = self._get_role_name(org_member)
+            llm_operation = _llm_operation(org, role_name)
             # ACP agents make their own model calls: no managed key to provision.
             item_llm = agent_llm(item.agent_settings)
             llm_model = item_llm.model if item_llm else None
@@ -1085,6 +1428,15 @@ class SaasSettingsStore(SettingsStore):
             agent_settings_update = _without_matching_values(
                 agent_settings_update, org_agent_settings
             )
+            agent_settings_update['schema_version'] = effective_agent_settings_diff[
+                'schema_version'
+            ]
+            agent_settings_update = _filter_member_document_patch(
+                org,
+                role_name,
+                'agent',
+                agent_settings_update,
+            )
             if llm_operation in {
                 ConfigurationOperation.LOCKED,
                 ConfigurationOperation.SUBSET,
@@ -1096,11 +1448,22 @@ class SaasSettingsStore(SettingsStore):
                     mode='json'
                 ),
             )
+            effective_conversation_diff = _filter_member_document_patch(
+                org,
+                role_name,
+                'conversation',
+                effective_conversation_diff,
+            )
 
             kwargs = item.model_dump(context={'expose_secrets': True})
             kwargs.pop('agent_settings', None)
             kwargs.pop('conversation_settings', None)
             kwargs.pop('user_consents_to_analytics', None)
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if _member_can_write_settings_path(org, role_name, f'product.{key}')
+            }
             # ``memory_context`` is written exclusively by the
             # MemoryChangeCallbackProcessor; a normal settings save must not
             # clobber it with the (possibly stale) value on the Settings object.

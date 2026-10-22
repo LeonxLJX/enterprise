@@ -223,10 +223,10 @@ function OrgDefaultLlmSettingsScreen() {
   }
 
   return (
-    <>
+    <div className="flex flex-col gap-8">
       {content}
       <SuperAdminGroupSetupModal />
-    </>
+    </div>
   );
 }
 

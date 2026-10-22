@@ -6,9 +6,9 @@ This module provides the V1 API routes for user settings under /api/v1/settings.
 import asyncio
 import os
 from collections import defaultdict
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, SecretStr
 
@@ -515,9 +515,19 @@ async def store_settings(
 
 @router.get('/document', response_model=SettingsDocument)
 async def load_settings_document(
+    scope: Annotated[
+        Literal['effective', 'organization', 'personal'], Query()
+    ] = 'effective',
     settings: Settings = Depends(get_user_settings),
+    settings_store: SettingsStore = Depends(get_user_settings_store),
 ) -> SettingsDocument:
-    """Return the effective organization + member settings document."""
+    """Return effective settings or a specific hierarchy-owned product layer."""
+    if scope != 'effective':
+        try:
+            product = await settings_store.load_document_product(scope)
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN) from exc
+        object.__setattr__(settings, '_product_settings_document', product)
     return build_settings_document(settings)
 
 
@@ -530,10 +540,11 @@ async def load_settings_document_schema() -> dict[str, Any]:
 @router.patch('/document', response_model=None)
 async def patch_settings_document(
     patch: SettingsDocumentPatch,
+    scope: Annotated[Literal['personal', 'organization'], Query()] = 'personal',
     settings_store: SettingsStore = Depends(get_user_settings_store),
     user_id: str | None = Depends(get_user_id),
 ) -> SettingsDocument | JSONResponse:
-    """Persist a sparse member patch over the effective organization settings."""
+    """Persist a sparse personal or organization document patch."""
     if 'resources' in patch.model_fields_set and patch.resources is not None:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -559,7 +570,13 @@ async def patch_settings_document(
             )
 
         settings = existing_settings.model_copy()
-        settings.update(payload)
+        settings.update(
+            {
+                key: value
+                for key, value in payload.items()
+                if key != 'product_settings_diff'
+            }
+        )
         _post_merge_llm_fixups(settings)
         if isinstance(settings.agent_settings, OpenHandsAgentSettings):
             rotated = await _maybe_rotate_stale_managed_key(
@@ -569,7 +586,7 @@ async def patch_settings_document(
             )
             object.__setattr__(settings.agent_settings, 'llm', rotated)
         settings.sync_active_profile_from_settings()
-        await settings_store.store_document_patch(payload, settings)
+        await settings_store.store_document_patch(payload, settings, scope=scope)
 
         reloaded_settings = await settings_store.load()
         if reloaded_settings is None:
@@ -577,7 +594,15 @@ async def patch_settings_document(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={'error': 'Settings not found'},
             )
+        if scope == 'organization':
+            product = await settings_store.load_document_product(scope)
+            object.__setattr__(reloaded_settings, '_product_settings_document', product)
         return build_settings_document(reloaded_settings)
+    except PermissionError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={'error': str(exc)},
+        )
     except ValueError as exc:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -86,18 +86,21 @@ def build_settings_document(settings: Settings) -> SettingsDocument:
     return SettingsDocument(
         agent=_safe_agent_document(settings),
         conversation=settings.conversation_settings.model_dump(mode='json'),
-        product=ProductSettings(
-            language=settings.language or 'en',
-            user_consents_to_analytics=settings.user_consents_to_analytics,
-            enable_sound_notifications=settings.enable_sound_notifications,
-            git_user_name=settings.git_user_name or '',
-            git_user_email=settings.git_user_email or '',
-            title_llm_profile=settings.title_llm_profile,
-            disabled_skills=settings.disabled_skills or [],
-            enabled_skills=settings.enabled_skills,
-            run_router_at_conversation_start=settings.run_router_at_conversation_start,
-            workspace_file_discovery=settings.workspace_file_discovery,
-            default_profile_migrated=settings.default_profile_migrated,
+        product=ProductSettings.model_validate(
+            {
+                'language': settings.language or 'en',
+                'user_consents_to_analytics': settings.user_consents_to_analytics,
+                'enable_sound_notifications': settings.enable_sound_notifications,
+                'git_user_name': settings.git_user_name or '',
+                'git_user_email': settings.git_user_email or '',
+                'title_llm_profile': settings.title_llm_profile,
+                'disabled_skills': settings.disabled_skills or [],
+                'enabled_skills': settings.enabled_skills,
+                'run_router_at_conversation_start': settings.run_router_at_conversation_start,
+                'workspace_file_discovery': settings.workspace_file_discovery,
+                'default_profile_migrated': settings.default_profile_migrated,
+                **getattr(settings, '_product_settings_document', {}),
+            }
         ),
         resources=SettingsResources(
             llm_profiles=profiles,
@@ -120,5 +123,19 @@ def settings_document_patch_payload(
     if 'conversation' in patch.model_fields_set and patch.conversation is not None:
         payload['conversation_settings_diff'] = patch.conversation
     if 'product' in patch.model_fields_set and patch.product is not None:
-        payload.update(patch.product.model_dump(exclude_unset=True))
+        product_patch = patch.product.model_dump(exclude_unset=True)
+        payload.update(
+            {
+                key: value
+                for key, value in product_patch.items()
+                if key in ProductSettings.model_fields
+            }
+        )
+        product_extensions = {
+            key: value
+            for key, value in product_patch.items()
+            if key not in ProductSettings.model_fields
+        }
+        if product_extensions:
+            payload['product_settings_diff'] = product_extensions
     return payload

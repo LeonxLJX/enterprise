@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SDK extension settings</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --background: #f5f7f4;
+        --surface: #fff;
+        --text: #17211b;
+        --muted: #667069;
+        --border: #d9e0da;
+        --accent: #17663d;
+        --success: #17663d;
+        --error: #a33a32;
+        --pending: #875700;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--background);
+        color: var(--text);
+        font:
+          15px/1.5 Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+
+      main {
+        width: min(900px, calc(100% - 32px));
+        margin: 48px auto;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(28px, 5vw, 40px);
+        line-height: 1.1;
+        letter-spacing: -0.035em;
+      }
+
+      h2 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+      p {
+        margin: 0;
+      }
+      .lede,
+      .help,
+      .endpoint {
+        color: var(--muted);
+      }
+      .lede {
+        max-width: 720px;
+        font-size: 16px;
+      }
+
+      .card {
+        margin-top: 24px;
+        padding: 22px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--surface);
+        box-shadow: 0 8px 28px rgba(23, 33, 27, 0.05);
+      }
+
+      .editor-header,
+      .actions,
+      .links {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .endpoint {
+        font:
+          12px/1.4 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 480px;
+        margin-top: 16px;
+        padding: 16px;
+        resize: vertical;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #fbfcfb;
+        color: var(--text);
+        font:
+          13px/1.55 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+        tab-size: 2;
+      }
+
+      textarea:focus {
+        outline: 3px solid rgba(23, 102, 61, 0.16);
+        border-color: var(--accent);
+      }
+
+      .help {
+        margin-top: 12px;
+        font-size: 13px;
+      }
+
+      code {
+        padding: 1px 4px;
+        border-radius: 4px;
+        background: #eef2ee;
+        color: #35423a;
+        font:
+          0.92em ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+
+      .actions {
+        margin-top: 18px;
+        align-items: flex-start;
+      }
+
+      button {
+        flex: 0 0 auto;
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 9px;
+        background: var(--accent);
+        color: white;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #105431;
+      }
+      button:focus-visible,
+      a:focus-visible {
+        outline: 3px solid rgba(23, 102, 61, 0.22);
+        outline-offset: 2px;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+      }
+
+      .status {
+        flex: 1;
+        min-width: 0;
+      }
+      .status strong {
+        display: block;
+      }
+      .status[data-state="success"] strong {
+        color: var(--success);
+      }
+      .status[data-state="error"] strong {
+        color: var(--error);
+      }
+      .status[data-state="pending"] strong {
+        color: var(--pending);
+      }
+
+      .results {
+        margin: 8px 0 0;
+        padding-left: 20px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .results .ok {
+        color: var(--success);
+      }
+      .results .failed {
+        color: var(--error);
+      }
+      .links {
+        align-items: flex-start;
+      }
+      .links div {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      a {
+        padding: 9px 12px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        color: var(--accent);
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      a:hover {
+        border-color: var(--accent);
+        background: #f3f8f4;
+      }
+      a[aria-disabled="true"] {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+
+      @media (max-width: 650px) {
+        main {
+          margin: 28px auto;
+        }
+        .editor-header,
+        .actions,
+        .links {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        button {
+          width: 100%;
+        }
+        textarea {
+          min-height: 520px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>SDK extension settings</h1>
+        <p class="lede">
+          Edit one JSON document, register each non-secret field with the local
+          Agent Server, then inspect the section in either settings UI.
+        </p>
+      </header>
+
+      <section class="card" aria-labelledby="editor-title">
+        <div class="editor-header">
+          <div>
+            <h2 id="editor-title">Settings document</h2>
+            <p class="endpoint">
+              PUT http://127.0.0.1:3000/api/settings/document-schema/fields
+            </p>
+          </div>
+        </div>
+
+        <textarea
+          id="settings-json"
+          aria-label="SDK extension settings JSON"
+          spellcheck="false"
+        >
+{
+  "section": {
+    "key": "product.prototype",
+    "label": "Prototype settings"
+  },
+  "fields": [
+    {
+      "key": "product.review_mode",
+      "label": "Review mode",
+      "description": "Open a live preview when an application starts.",
+      "value_type": "boolean",
+      "default": true,
+      "prominence": "major"
+    },
+    {
+      "key": "product.ice_cream_flavor",
+      "label": "Ice cream flavor",
+      "description": "Choose the default flavor for product celebrations.",
+      "value_type": "string",
+      "default": "vanilla",
+      "choices": [
+        { "label": "Vanilla", "value": "vanilla" },
+        { "label": "Chocolate", "value": "chocolate" },
+        { "label": "Strawberry", "value": "strawberry" }
+      ],
+      "prominence": "major"
+    }
+  ]
+}</textarea
+        >
+
+        <p class="help">
+          Required: <code>section.key</code>, <code>section.label</code>, and a
+          non-empty <code>fields</code> array. Each field requires
+          <code>key</code>, <code>label</code>, <code>description</code>,
+          <code>value_type</code>, and <code>default</code>. Optional:
+          <code>prominence</code> and <code>choices</code>. Fields marked
+          <code>secret</code>, <code>containsSecrets</code>, or using
+          <code>value_type: "secret"</code> are rejected.
+        </p>
+
+        <div class="actions">
+          <button id="commit" type="button">Commit settings</button>
+          <div
+            id="status"
+            class="status"
+            data-state="idle"
+            role="status"
+            aria-live="polite"
+          >
+            <strong>Ready</strong>
+            <span>Edit the document or commit the two default fields.</span>
+            <ul id="results" class="results"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="card links" aria-labelledby="inspect-title">
+        <div>
+          <h2 id="inspect-title">Inspect this section</h2>
+          <p class="help">Links update from <code>section.key</code>.</p>
+        </div>
+        <div>
+          <a id="canvas-link" target="_blank" rel="noreferrer"
+            >Open in Agent Canvas</a
+          >
+          <a id="enterprise-link" target="_blank" rel="noreferrer"
+            >Open in Enterprise</a
+          >
+        </div>
+      </section>
+    </main>
+
+    <script>
+      "use strict";
+
+      const AGENT_SERVER_URL = "http://127.0.0.1:3000";
+      const API_KEY = "settings-prototype-local";
+      const editor = document.querySelector("#settings-json");
+      const commitButton = document.querySelector("#commit");
+      const status = document.querySelector("#status");
+      const results = document.querySelector("#results");
+      const canvasLink = document.querySelector("#canvas-link");
+      const enterpriseLink = document.querySelector("#enterprise-link");
+
+      function requireText(value, path) {
+        if (typeof value !== "string" || !value.trim()) {
+          throw new Error(`${path} must be a non-empty string.`);
+        }
+        return value.trim();
+      }
+
+      function validateDocument(source) {
+        let settingsDocument;
+        try {
+          settingsDocument = JSON.parse(source);
+        } catch (error) {
+          throw new Error(`Invalid JSON: ${error.message}`);
+        }
+
+        if (
+          !settingsDocument ||
+          Array.isArray(settingsDocument) ||
+          typeof settingsDocument !== "object"
+        ) {
+          throw new Error("The top-level JSON value must be an object.");
+        }
+        if (
+          !settingsDocument.section ||
+          typeof settingsDocument.section !== "object" ||
+          Array.isArray(settingsDocument.section)
+        ) {
+          throw new Error("section must be an object.");
+        }
+
+        const section = {
+          key: requireText(settingsDocument.section.key, "section.key"),
+          label: requireText(settingsDocument.section.label, "section.label"),
+        };
+
+        if (
+          !Array.isArray(settingsDocument.fields) ||
+          settingsDocument.fields.length === 0
+        ) {
+          throw new Error("fields must be a non-empty array.");
+        }
+
+        const seen = new Set();
+        const fields = settingsDocument.fields.map((field, index) => {
+          const path = `fields[${index}]`;
+          if (!field || Array.isArray(field) || typeof field !== "object") {
+            throw new Error(`${path} must be an object.`);
+          }
+
+          const valueType = requireText(field.value_type, `${path}.value_type`);
+          if (
+            valueType.toLowerCase() === "secret" ||
+            field.secret === true ||
+            field.containsSecrets === true ||
+            field.contains_secrets === true
+          ) {
+            throw new Error(
+              `${path} is a secret field. This endpoint must not register plaintext secrets.`,
+            );
+          }
+          if (!Object.prototype.hasOwnProperty.call(field, "default")) {
+            throw new Error(
+              `${path}.default is required (use null when appropriate).`,
+            );
+          }
+
+          const key = requireText(field.key, `${path}.key`);
+          if (seen.has(key)) throw new Error(`Duplicate field key: ${key}.`);
+          seen.add(key);
+
+          const choices = field.choices ?? [];
+          if (!Array.isArray(choices))
+            throw new Error(`${path}.choices must be an array.`);
+          choices.forEach((choice, choiceIndex) => {
+            requireText(choice?.label, `${path}.choices[${choiceIndex}].label`);
+            if (
+              !choice ||
+              !Object.prototype.hasOwnProperty.call(choice, "value")
+            ) {
+              throw new Error(
+                `${path}.choices[${choiceIndex}].value is required.`,
+              );
+            }
+          });
+
+          return {
+            key,
+            label: requireText(field.label, `${path}.label`),
+            description: requireText(field.description, `${path}.description`),
+            value_type: valueType,
+            default: field.default,
+            prominence: field.prominence
+              ? requireText(field.prominence, `${path}.prominence`)
+              : "major",
+            choices,
+          };
+        });
+
+        return { section, fields };
+      }
+
+      function setStatus(state, title, detail) {
+        status.dataset.state = state;
+        status.querySelector("strong").textContent = title;
+        status.querySelector("span").textContent = detail;
+      }
+
+      function setLinks(sectionKey) {
+        const encodedKey = encodeURIComponent(sectionKey);
+        canvasLink.href = `http://127.0.0.1:9000/settings/document/${encodedKey}`;
+        enterpriseLink.href = `http://127.0.0.1:10000/settings/document/${encodedKey}`;
+        canvasLink.removeAttribute("aria-disabled");
+        enterpriseLink.removeAttribute("aria-disabled");
+      }
+
+      function disableLinks() {
+        canvasLink.removeAttribute("href");
+        enterpriseLink.removeAttribute("href");
+        canvasLink.setAttribute("aria-disabled", "true");
+        enterpriseLink.setAttribute("aria-disabled", "true");
+      }
+
+      function updateLinks() {
+        try {
+          const settingsDocument = JSON.parse(editor.value);
+          setLinks(requireText(settingsDocument?.section?.key, "section.key"));
+        } catch {
+          disableLinks();
+        }
+      }
+
+      async function commitSettings() {
+        results.replaceChildren();
+
+        let settingsDocument;
+        try {
+          settingsDocument = validateDocument(editor.value);
+        } catch (error) {
+          setStatus("error", "Validation failed", error.message);
+          return;
+        }
+
+        setLinks(settingsDocument.section.key);
+        commitButton.disabled = true;
+        setStatus(
+          "pending",
+          "Committing settings",
+          `Sending 0 of ${settingsDocument.fields.length} fields…`,
+        );
+
+        let succeeded = 0;
+        for (const [index, field] of settingsDocument.fields.entries()) {
+          setStatus(
+            "pending",
+            "Committing settings",
+            `Sending ${index + 1} of ${settingsDocument.fields.length}: ${field.key}`,
+          );
+          const item = document.createElement("li");
+
+          try {
+            const response = await fetch(
+              `${AGENT_SERVER_URL}/api/settings/document-schema/fields`,
+              {
+                method: "PUT",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Session-API-Key": API_KEY,
+                },
+                body: JSON.stringify({
+                  ...field,
+                  section: settingsDocument.section.key,
+                  section_label: settingsDocument.section.label,
+                }),
+              },
+            );
+
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) {
+              const detail =
+                typeof payload?.detail === "string"
+                  ? payload.detail
+                  : `HTTP ${response.status}`;
+              throw new Error(detail);
+            }
+
+            succeeded += 1;
+            item.className = "ok";
+            item.textContent = `${field.key}: committed (HTTP ${response.status})`;
+          } catch (error) {
+            item.className = "failed";
+            item.textContent = `${field.key}: failed — ${error.message}`;
+          }
+          results.append(item);
+        }
+
+        commitButton.disabled = false;
+        const failed = settingsDocument.fields.length - succeeded;
+        if (failed === 0) {
+          setStatus(
+            "success",
+            "Settings committed",
+            `${succeeded} field${succeeded === 1 ? "" : "s"} registered in ${settingsDocument.section.label}.`,
+          );
+        } else {
+          setStatus(
+            "error",
+            "Commit completed with errors",
+            `${succeeded} committed; ${failed} failed. See results below.`,
+          );
+        }
+      }
+
+      editor.addEventListener("input", updateLinks);
+      commitButton.addEventListener("click", commitSettings);
+      updateLinks();
+    </script>
+  </body>
+</html>

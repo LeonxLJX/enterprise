@@ -8,7 +8,10 @@ from openhands.app_server.settings.settings_document import (
     settings_document_patch_payload,
 )
 from openhands.app_server.settings.settings_models import Settings
-from openhands.app_server.settings.settings_router import patch_settings_document
+from openhands.app_server.settings.settings_router import (
+    load_settings_document,
+    patch_settings_document,
+)
 from openhands.sdk.settings import SettingsDocument, SettingsDocumentPatch
 
 
@@ -16,14 +19,22 @@ class RecordingSettingsStore:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.payload: dict[str, Any] | None = None
+        self.document_product: dict[str, Any] = {}
+        self.loaded_scope: str | None = None
 
     async def load(self) -> Settings:
         return self.settings
+
+    async def load_document_product(self, scope: str) -> dict[str, Any]:
+        self.loaded_scope = scope
+        return self.document_product
 
     async def store_document_patch(
         self,
         payload: dict[str, Any],
         effective_settings: Settings,
+        *,
+        scope: str = 'personal',
     ) -> None:
         self.payload = payload
         self.settings = effective_settings
@@ -66,6 +77,35 @@ def test_document_replaces_secret_values_with_opaque_references() -> None:
     assert document['resources']['credentials']['search_api_key']['is_set'] is True
 
 
+def test_document_includes_effective_dynamic_product_settings() -> None:
+    settings = Settings()
+    object.__setattr__(
+        settings,
+        '_product_settings_document',
+        {'prototype_banner': 'compact'},
+    )
+
+    document = build_settings_document(settings).model_dump(mode='json')
+
+    assert document['product']['prototype_banner'] == 'compact'
+
+
+@pytest.mark.asyncio
+async def test_load_document_supports_personal_product_scope() -> None:
+    settings = Settings()
+    store = RecordingSettingsStore(settings)
+    store.document_product = {'review_mode': True}
+
+    document = await load_settings_document(
+        scope='personal',
+        settings=settings,
+        settings_store=store,  # type: ignore[arg-type]
+    )
+
+    assert store.loaded_scope == 'personal'
+    assert document.product.model_dump()['review_mode'] is True
+
+
 def test_patch_translation_is_sparse_and_drops_secret_plaintext() -> None:
     patch = SettingsDocumentPatch(
         agent={
@@ -76,7 +116,7 @@ def test_patch_translation_is_sparse_and_drops_secret_plaintext() -> None:
             },
             'agent_context': {'secrets': {'TOKEN': 'must-not-be-accepted'}},
         },
-        product={'language': 'fr'},
+        product={'language': 'fr', 'prototype_banner': 'compact'},
     )
 
     payload = settings_document_patch_payload(patch)
@@ -87,6 +127,7 @@ def test_patch_translation_is_sparse_and_drops_secret_plaintext() -> None:
             'agent_context': {},
         },
         'language': 'fr',
+        'product_settings_diff': {'prototype_banner': 'compact'},
     }
 
 

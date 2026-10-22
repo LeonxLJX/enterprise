@@ -159,10 +159,13 @@ export type SettingsScope = "personal" | "org";
 
 export type ConfigurationOperation = "locked" | "replace" | "subset" | "extend";
 
+export type ConfigurationRule = {
+  operation: ConfigurationOperation;
+};
+
 export type ConfigurationPolicy = {
-  llm: {
-    operation: ConfigurationOperation;
-  };
+  llm: ConfigurationRule;
+  settings?: Record<string, ConfigurationRule>;
 };
 
 export type MarketplaceRegistration = {

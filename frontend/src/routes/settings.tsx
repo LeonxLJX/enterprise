@@ -281,7 +281,11 @@ function SettingsScreen() {
   const orgWideBadgeVariant =
     me?.role === "member" ? "managed-by-admin" : "org-wide";
 
-  const { currentSectionTitle, currentSectionSubtitle } = useMemo(() => {
+  const {
+    currentSectionTitle,
+    currentSectionSubtitle,
+    currentSectionIsSchemaDefined,
+  } = useMemo(() => {
     const currentRenderedItem = navItems.find(
       (item) => item.type === "item" && item.item.to === location.pathname,
     );
@@ -289,6 +293,8 @@ function SettingsScreen() {
       return {
         currentSectionTitle: currentRenderedItem.item.text,
         currentSectionSubtitle: currentRenderedItem.item.subtitle,
+        currentSectionIsSchemaDefined:
+          currentRenderedItem.item.isSchemaDefined === true,
       };
     }
     const firstItem = navItems.find((item) => item.type === "item");
@@ -296,11 +302,13 @@ function SettingsScreen() {
       return {
         currentSectionTitle: firstItem.item.text,
         currentSectionSubtitle: firstItem.item.subtitle,
+        currentSectionIsSchemaDefined: firstItem.item.isSchemaDefined === true,
       };
     }
     return {
       currentSectionTitle: "SETTINGS$TITLE",
       currentSectionSubtitle: null as string | null,
+      currentSectionIsSchemaDefined: false,
     };
   }, [navItems, location.pathname]);
 
@@ -321,13 +329,19 @@ function SettingsScreen() {
         <div className="flex flex-col gap-6 pb-8">
           {!shouldHideTitle && (
             <header className="space-y-1">
-              <Typography.H2>{t(currentSectionTitle)}</Typography.H2>
+              <Typography.H2>
+                {currentSectionIsSchemaDefined
+                  ? currentSectionTitle
+                  : t(currentSectionTitle)}
+              </Typography.H2>
               {currentSectionSubtitle ? (
                 <p
                   data-testid="settings-page-subtitle"
                   className="text-sm leading-5 text-muted"
                 >
-                  {t(currentSectionSubtitle)}
+                  {currentSectionIsSchemaDefined
+                    ? currentSectionSubtitle
+                    : t(currentSectionSubtitle)}
                 </p>
               ) : null}
             </header>

@@ -27,6 +27,7 @@ export interface SettingsNavItem {
   /** Short grey subline under the page title (`settings.tsx`). */
   subtitle: string;
   section?: SettingsNavSection;
+  isSchemaDefined?: boolean;
   // When true, this item is greyed out (and its route redirects to
   // ``/settings/agent``) while the personal-scope active agent is ACP.
   // The ACP sub-agent manages its own LLM and condenser, so those

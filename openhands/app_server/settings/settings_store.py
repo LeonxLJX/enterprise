@@ -43,10 +43,23 @@ class SettingsStore(ABC):
     async def store(self, settings: Settings) -> None:
         """Store session init data."""
 
+    async def load_document_product(
+        self,
+        scope: str = 'effective',
+    ) -> dict[str, Any]:
+        """Load the dynamic product settings visible at a hierarchy scope."""
+        settings = await self.load()
+        if settings is None:
+            return {}
+        product = getattr(settings, '_product_settings_document', {})
+        return dict(product) if isinstance(product, dict) else {}
+
     async def store_document_patch(
         self,
         payload: dict[str, Any],
         effective_settings: Settings,
+        *,
+        scope: str = 'personal',
     ) -> None:
         """Persist a validated document patch.
 

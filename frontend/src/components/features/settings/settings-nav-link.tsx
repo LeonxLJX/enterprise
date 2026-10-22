@@ -27,7 +27,7 @@ export function SettingsNavLink({
 }: SettingsNavLinkProps) {
   const { t } = useTranslation();
   const { to, icon, text } = item;
-  const label = t(text as I18nKey);
+  const label = item.isSchemaDefined ? text : t(text as I18nKey);
 
   if (disabled) {
     const tooltip = disabledAgentName
