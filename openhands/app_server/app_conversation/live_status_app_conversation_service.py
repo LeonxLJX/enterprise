@@ -1035,8 +1035,27 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         """Wait for sandbox to start and return info."""
         # Get or create the sandbox
         if not task.request.sandbox_id:
+            template_id = task.request.sandbox_spec_id
+            if template_id is not None:
+                if not self.sandbox_spec_service.selection_enabled:
+                    raise SandboxError(
+                        'Sandbox selection is not enabled for this organization'
+                    )
+                spec = await self.sandbox_spec_service.get_start_sandbox_spec(
+                    template_id
+                )
+                if spec is None:
+                    raise SandboxError(
+                        'Sandbox template is unavailable for this organization'
+                    )
             # First try to find a running sandbox for the current user
-            sandbox = await self._find_running_sandbox_for_user()
+            # An explicit template must never reuse an unrelated grouped sandbox.
+            sandbox = (
+                None
+                if template_id is not None
+                or not self.sandbox_spec_service.allow_sandbox_reuse
+                else await self._find_running_sandbox_for_user()
+            )
             if sandbox is None:
                 # No running sandbox found, start a new one
 
@@ -1047,9 +1066,10 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     else None
                 )
 
-                sandbox = await self.sandbox_service.start_sandbox(
-                    sandbox_id=sandbox_id_str
-                )
+                start_options = {'sandbox_id': sandbox_id_str}
+                if template_id is not None:
+                    start_options['sandbox_spec_id'] = template_id
+                sandbox = await self.sandbox_service.start_sandbox(**start_options)
             task.sandbox_id = sandbox.id
         else:
             sandbox_info = await self.sandbox_service.get_sandbox(

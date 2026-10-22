@@ -65,6 +65,8 @@ def mock_sandbox_spec_service():
     )
     mock_service.get_default_sandbox_spec.return_value = mock_spec
     mock_service.get_sandbox_spec.return_value = mock_spec
+    # The unrestricted service delegates start resolution to normal lookup.
+    mock_service.get_start_sandbox_spec = mock_service.get_sandbox_spec
     return mock_service
 
 
