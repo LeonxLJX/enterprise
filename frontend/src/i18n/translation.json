@@ -36209,6 +36209,23 @@
     "uk": "Accept new registrations",
     "ca": "Accept new registrations"
   },
+  "SUPER_ADMIN$AUTH_PROVIDER_ENABLED": {
+    "en": "Enabled",
+    "ja": "Enabled",
+    "zh-CN": "Enabled",
+    "zh-TW": "Enabled",
+    "ko-KR": "Enabled",
+    "no": "Enabled",
+    "it": "Enabled",
+    "pt": "Enabled",
+    "es": "Enabled",
+    "ar": "Enabled",
+    "fr": "Enabled",
+    "tr": "Enabled",
+    "de": "Enabled",
+    "uk": "Enabled",
+    "ca": "Enabled"
+  },
   "SUPER_ADMIN$AUTH_PROVIDER_ALLOW_REGISTRATION_HINT": {
     "en": "When off, only people who already have an account linked to this provider can sign in through it; a first-time identity is refused instead of creating a new user.",
     "ja": "When off, only people who already have an account linked to this provider can sign in through it; a first-time identity is refused instead of creating a new user.",
@@ -36956,6 +36973,23 @@
     "de": "Login IDP",
     "uk": "Login IDP",
     "ca": "Login IDP"
+  },
+  "SUPER_ADMIN$COL_ENABLED": {
+    "en": "Enabled",
+    "ja": "Enabled",
+    "zh-CN": "Enabled",
+    "zh-TW": "Enabled",
+    "ko-KR": "Enabled",
+    "no": "Enabled",
+    "it": "Enabled",
+    "pt": "Enabled",
+    "es": "Enabled",
+    "ar": "Enabled",
+    "fr": "Enabled",
+    "tr": "Enabled",
+    "de": "Enabled",
+    "uk": "Enabled",
+    "ca": "Enabled"
   },
   "SUPER_ADMIN$DELETE_AUTH_PROVIDER_TITLE": {
     "en": "Delete auth provider",
