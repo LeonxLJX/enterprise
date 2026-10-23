@@ -29,8 +29,10 @@ class GitlabDeliveryStore:
         rolls back and the body can be processed again. A copy claimed while
         another is in progress waits for that one to commit or roll back.
 
-        First deletes a batch of entries older than RETENTION, so the table
-        stays bounded without a scheduled job.
+        First deletes a batch of entries older than RETENTION, in a transaction
+        of its own so the deleted rows are not locked while the caller
+        processes and stay deleted if it fails. The table stays bounded
+        without a scheduled job.
         """
         digest = hashlib.sha256(body).hexdigest()
         expired = (
@@ -39,14 +41,18 @@ class GitlabDeliveryStore:
             .limit(PRUNE_BATCH)
             .with_for_update(skip_locked=True)
         )
-        async with a_session_maker() as session, session.begin():
-            await session.execute(
-                delete(GitlabDelivery).where(GitlabDelivery.body_sha256.in_(expired))
-            )
-            inserted = await session.execute(
-                insert(GitlabDelivery)
-                .values(body_sha256=digest)
-                .on_conflict_do_nothing(index_elements=['body_sha256'])
-                .returning(GitlabDelivery.body_sha256)
-            )
-            yield inserted.scalar_one_or_none() is not None
+        async with a_session_maker() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(GitlabDelivery).where(
+                        GitlabDelivery.body_sha256.in_(expired)
+                    )
+                )
+            async with session.begin():
+                inserted = await session.execute(
+                    insert(GitlabDelivery)
+                    .values(body_sha256=digest)
+                    .on_conflict_do_nothing(index_elements=['body_sha256'])
+                    .returning(GitlabDelivery.body_sha256)
+                )
+                yield inserted.scalar_one_or_none() is not None

@@ -304,6 +304,21 @@ async def test_an_entry_past_retention_is_pruned_and_its_body_counts_as_new(
     assert not await claim_and_finish(b'old')
 
 
+async def test_entries_past_retention_stay_pruned_when_the_pruning_delivery_fails(
+    manager, hook_row, age_deliveries, async_session_maker
+):
+    await claim_and_finish(b'old')
+    await age_deliveries(RETENTION + timedelta(minutes=1))
+    manager.failures = 1
+
+    failed = await deliver(note_event())
+
+    assert failed.status_code == 400
+    async with async_session_maker() as session:
+        left = await session.scalar(select(func.count()).select_from(GitlabDelivery))
+    assert left == 0
+
+
 async def test_pruning_deletes_at_most_one_batch_per_claim(
     manager, age_deliveries, async_session_maker
 ):
