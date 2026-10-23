@@ -23,12 +23,15 @@ export interface OAuthProviderDetails {
   kind: "OAuthProviderDetails";
   provider_type: OAuthProviderBrand;
   client_id: string;
-  client_secret: string | null;
+  client_secret?: string | null;
   authorization_url: string | null;
   token_url: string | null;
   userinfo_url: string | null;
   scopes: string[] | null;
   permitted_drift_seconds: number;
+  /** For a Keycloak-federated login row: the git provider whose real token
+   * is additionally fetched from Keycloak after login. ``null`` otherwise. */
+  legacy_keycloak_type: Exclude<OAuthProviderBrand, "enterprise_sso"> | null;
 }
 
 /** Mirrors ``storage.auth_provider_details.PasswordProviderDetails`` -- the
@@ -112,6 +115,10 @@ export interface AuthProvider {
    * authenticates through this provider, or whether only an already-linked
    * account may sign in through it. */
   allow_registration: boolean;
+  /** Initial value of a new user's `allow_match_by_email` flag when they are
+   * first created by a login through this provider -- see the backend's
+   * `server.auth.provider_identity.resolve_or_create_user`. */
+  allow_match_by_email: boolean;
   details: AuthProviderDetails;
   created_at: string;
   updated_at: string;
@@ -123,6 +130,7 @@ export interface CreateAuthProviderParams {
   icon?: string | null;
   color?: string;
   allow_registration?: boolean;
+  allow_match_by_email?: boolean;
   details: AuthProviderDetails;
 }
 
@@ -146,4 +154,25 @@ export interface PublicIdpProvider {
   icon: string | null;
   color: string;
   provider_type: OAuthProviderBrand | null;
+}
+
+/** A single ``auth_provider_users`` row for one provider, joined with the
+ * linked ``User.email`` -- mirrors
+ * ``server.routes.oauth_providers_admin.AuthProviderUserResponse``. Backs
+ * the admin "User Links" table
+ * (``/super-admin/auth-providers/{provider_id}/users``). */
+export interface AuthProviderUserLink {
+  id: number;
+  user_id: string;
+  email: string | null;
+  external_subject_id: string;
+  external_email: string | null;
+}
+
+/** Paginated response for ``GET /{provider_id}/users``. */
+export interface AuthProviderUserLinkPage {
+  items: AuthProviderUserLink[];
+  total: number;
+  current_page: number;
+  per_page: number;
 }

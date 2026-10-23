@@ -1,3 +1,5 @@
+> Historical validation of the original PR. For the October 23 refresh against current main, see [refresh-validation.md](refresh-validation.md). Migration numbers and SDK versions below describe the earlier implementation.
+
 # Enterprise Agent Profile validation
 
 Implementation tested by the HTTP harness: `ea3be78b4d77b329e3b2ba6dfbba2aefcf1b8245`.

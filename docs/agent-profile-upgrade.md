@@ -1,6 +1,6 @@
 # Upgrade Enterprise Agent Profiles
 
-This release adopts the SDK 1.54.0 launch contract. The Enterprise Python SDK,
+This release adopts the SDK 1.57.0 launch contract. The Enterprise Python SDK,
 agent-server and tools packages, the lint environment, and the bundled sandbox
 image must use the same released version. External Helm/runtime-api image pins
 must be updated by their deployment owner as well.
@@ -17,7 +17,7 @@ must be updated by their deployment owner as well.
    An exit status of 2 requires repair or a compatible newer release before
    proceeding. Never delete opaque profiles to make the audit pass.
 4. Run `uv run alembic heads` and verify one head. The profile-tools migration is
-   revision 189 after 188. Do not reuse or edit the released revision 175.
+   revision 196 after 195. Do not reuse or edit the released revision 175.
 
 A rolling update with unrestricted old writers is unsafe: older releases can
 remove profiles they cannot parse when saving an envelope. The new release
@@ -27,7 +27,7 @@ cutover, rather than relying on mixed-version saves.
 
 ## Migration and cutover
 
-Run `uv run alembic upgrade head` with the writes still frozen. Revision 189
+Run `uv run alembic upgrade head` with the writes still frozen. Revision 196
 changes only OpenHands profiles at a known legacy schema version (missing, 1 or
 2) whose `tools` is `[]`: those old Cloud profiles always launched the standard
 set, so they become `tools: null`. Current profiles at version 3 retain a
@@ -65,9 +65,14 @@ of an old empty tool list and is not a data rollback.
 
 Ordinary OpenHands and ACP launches forward resolved settings; the sandbox SDK
 finalizes runtime fields. PLAN and request-level raw prompts retain the supported
-raw-agent transport because SDK 1.54.0 settings cannot represent those prompt
+raw-agent transport because SDK 1.57.0 settings cannot represent those prompt
 presets. The sandbox still finalizes that source. Profile tool selections and
 persona/context restrictions remain authoritative in both paths.
+
+Profile secret selection filters stored, integration and request-provided secrets.
+The Azure DevOps credential-helper token written during repository setup remains
+registered for output masking even when omitted from that selection. Profile
+secret selection does not revoke credentials already present in the workspace.
 
 Profile MCP selection filters the user's configured MCP catalog, as defined by
 the SDK. Enterprise's platform MCP integration remains a separate serving-layer

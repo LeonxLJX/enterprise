@@ -83,14 +83,13 @@ export default function AgentSettingsScreen() {
   const isAcpEnabled = !!config?.feature_flags?.enable_acp;
   const acpProviders = config?.acp_providers ?? EMPTY_ACP_PROVIDERS;
 
+  // ── Parallel tool calls (OpenHands mode) ─────────────────────────────────
+  // Surfaced only when the backend schema exposes the field, so older
+  // agent-servers that predate ``tool_concurrency_limit`` hide it cleanly.
   const fields = useMemo(
     () => schema?.sections.flatMap((section) => section.fields),
     [schema],
   );
-
-  // ── Parallel tool calls (OpenHands mode) ─────────────────────────────────
-  // Surfaced only when the backend schema exposes the field, so older
-  // agent-servers that predate ``tool_concurrency_limit`` hide it cleanly.
   const toolConcurrencyField = fields?.find(
     (field) => field.key === TOOL_CONCURRENCY_FIELD_KEY,
   );
@@ -222,6 +221,7 @@ export default function AgentSettingsScreen() {
       // Agent-kind flip: backend resets to defaults, send kind alone.
       agentSettingsDiff = { agent_kind: "openhands" };
     } else {
+      // Parallel tool calls. Sub-agents are part of the saved ``tools``.
       agentSettingsDiff = {};
 
       if (toolConcurrencyField) {

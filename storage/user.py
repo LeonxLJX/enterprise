@@ -34,6 +34,12 @@ class User(Base):
     # Instance-level super role; org membership roles live on OrgMember.role_id.
     # Effective permissions are defined by SUPER_ROLE_PERMISSIONS.
     role_id: Mapped[int | None] = mapped_column(ForeignKey('role.id'), nullable=True)
+    deletion_pending: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default='false'
+    )
+    credentials_revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     accepted_tos: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     first_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -54,8 +60,13 @@ class User(Base):
     onboarding_completed: Mapped[bool | None] = mapped_column(
         nullable=True, default=False
     )
-    # NULL inherits the deployment-wide daily conversation limit.
-    daily_conversation_limit: Mapped[int | None] = mapped_column(nullable=True)
+    # NULL inherits the deployment-wide daily sandbox limit.
+    # Physical column keeps its legacy name: pods on images from before
+    # this change still map daily_conversation_limit and must keep
+    # working during rolling deploys.
+    daily_sandbox_limit: Mapped[int | None] = mapped_column(
+        'daily_conversation_limit', nullable=True
+    )
     # Work email submitted for quota increase requests; verified via
     # signed email link before the requested limit is applied.
     work_email: Mapped[str | None] = mapped_column(String(255), nullable=True)

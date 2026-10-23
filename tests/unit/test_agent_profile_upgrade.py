@@ -32,11 +32,15 @@ def test_audit_reports_invalid_versions_without_mutating_input(version):
     assert envelope == original
 
 
-def test_real_upgrade_from_186_preserves_opaque_and_intentionally_bare_profiles(
+@pytest.mark.parametrize('starting_revision', ['192', '195'])
+def test_real_upgrade_preserves_opaque_and_intentionally_bare_profiles(
+    starting_revision,
     test_database,
     session_maker,
 ):
-    run_alembic(test_database.server, test_database.name, 'downgrade', '186')
+    run_alembic(
+        test_database.server, test_database.name, 'downgrade', starting_revision
+    )
     legacy = _profile(name='legacy', schema_version=2)
     bare = _profile(name='bare', schema_version=3)
     future = _profile(name='future', schema_version=99, future_settings={'keep': True})
@@ -58,7 +62,7 @@ def test_real_upgrade_from_186_preserves_opaque_and_intentionally_bare_profiles(
             session.execute(
                 text('SELECT version_num FROM alembic_version')
             ).scalar_one()
-            == '189'
+            == '196'
         )
     expected = copy.deepcopy(original)
     expected['profiles'][legacy['id']]['tools'] = None

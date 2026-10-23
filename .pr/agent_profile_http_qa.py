@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import socket
+from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -17,7 +18,9 @@ from pydantic import SecretStr
 from tests import postgres_testdb
 
 ROOT = Path(__file__).resolve().parents[1]
-REPORT = ROOT / '.pr' / 'agent-profile-http-qa.json'
+REPORT = Path(
+    os.environ.get('QA_REPORT', str(ROOT / '.pr' / 'agent-profile-http-qa.json'))
+)
 RUNTIME_URL = os.environ['AGENT_SERVER_URL']
 RUNTIME_KEY = os.environ['SESSION_API_KEY']
 ORG_ID, USER_ID = uuid4(), uuid4()
@@ -77,9 +80,14 @@ async def main():
         )
     )
     cipher = Cipher(key_file.read_text().strip()) if key_file.exists() else None
-    llm = LLMProfileStore(base_dir=profile_dir).load(
-        os.environ.get('QA_LLM_PROFILE', 'sonnet'), cipher=cipher
-    )
+    if os.environ.get('QA_LLM_JSON'):
+        from openhands.sdk import LLM
+
+        llm = LLM.model_validate_json(os.environ['QA_LLM_JSON'])
+    else:
+        llm = LLMProfileStore(base_dir=profile_dir).load(
+            os.environ.get('QA_LLM_PROFILE', 'sonnet'), cipher=cipher
+        )
     assert llm.api_key is not None and not llm.api_key.get_secret_value().startswith(
         'gAAAA'
     )
@@ -217,7 +225,7 @@ async def main():
             initial_message=None,
             system_message_suffix='RUNTIME_SUFFIX',
             git_provider=None,
-            working_dir=str(ROOT / '.pr' / 'workspace'),
+            working_dir=os.environ.get('QA_WORKSPACE', str(ROOT / '.pr' / 'workspace')),
             agent_type=AgentType(body.get('agent_type', 'default')),
             api_secrets={'DENIED_API_QA': SecretStr('denied-api-value')},
         )
@@ -262,7 +270,7 @@ async def main():
             break
         await asyncio.sleep(0.05)
     results = {
-        'sdk_version': '1.54.0',
+        'sdk_version': version('openhands-sdk'),
         'identity': 'Local bearer identity fixture; real org permissions, PostgreSQL, router, resolver and builder. No deployed Keycloak or Cloud orchestration.',
         'cases': [],
     }
@@ -306,6 +314,45 @@ async def main():
                 assert record['suffix'] == 'PROFILE_SUFFIX\n\nRUNTIME_SUFFIX'
                 assert record['request_secret_names'] == ['ALLOWED_QA']
                 assert record['wire_source'] == 'agent_settings'
+                results['cases'].append({'name': name, 'preview_valid': True, **record})
+            for name, selection in (
+                (
+                    'coding-no-browser',
+                    [{'name': n} for n in ('terminal', 'file_editor', 'task_tracker')],
+                ),
+                ('default-tools', None),
+            ):
+                response = await client.post(
+                    f'/api/agent-profiles/{name}',
+                    json={**profile, 'tools': selection, 'mcp_server_refs': []},
+                )
+                response.raise_for_status()
+                profile_id = next(
+                    p['id']
+                    for p in (await client.get('/api/agent-profiles')).json()[
+                        'profiles'
+                    ]
+                    if p['name'] == name
+                )
+                preview = await client.post(f'/api/agent-profiles/{name}/materialize')
+                preview.raise_for_status()
+                assert preview.json()['valid'] is True
+                response = await client.post(
+                    '/_qa/launch', json={'profile_id': profile_id}
+                )
+                response.raise_for_status()
+                record = response.json()
+                conversations.append(record['id'])
+                if selection is not None:
+                    assert record['tools'] == [t['name'] for t in selection]
+                    assert 'browser_tool_set' not in record['tools']
+                else:
+                    assert (
+                        'terminal' in record['tools']
+                        and 'browser_tool_set' in record['tools']
+                    )
+                assert record['persona'] == profile['persona']
+                assert record['mcp_servers'] == []
                 results['cases'].append({'name': name, 'preview_valid': True, **record})
             before = len(launches)
             response = await client.post(
@@ -445,7 +492,8 @@ async def main():
             assert 'ENTERPRISE_PROFILE_QA_OK' in json.dumps(observations)
             results['cases'].append(
                 {
-                    'name': 'real_sonnet_mcp',
+                    'name': 'real_model_mcp',
+                    'model': llm.model,
                     'execution_status': 'finished',
                     'tool': 'qa_echo',
                     'marker': 'ENTERPRISE_PROFILE_QA_OK',
