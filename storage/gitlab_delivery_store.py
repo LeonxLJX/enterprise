@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -17,8 +19,15 @@ PRUNE_BATCH = 100
 
 @dataclass
 class GitlabDeliveryStore:
-    async def record(self, body: bytes) -> bool:
-        """Record a delivery by its raw body; False if that body was seen before.
+    @asynccontextmanager
+    async def claim(self, body: bytes) -> AsyncIterator[bool]:
+        """Claim a delivery by its raw body while the caller processes it.
+
+        Yields False if that body was already processed. The entry is written
+        in a transaction that commits only when the block exits normally. If
+        the block raises or is cancelled, or the process dies, the transaction
+        rolls back and the body can be processed again. A copy claimed while
+        another is in progress waits for that one to commit or roll back.
 
         First deletes a batch of entries older than RETENTION, so the table
         stays bounded without a scheduled job.
@@ -40,5 +49,4 @@ class GitlabDeliveryStore:
                 .on_conflict_do_nothing(index_elements=['body_sha256'])
                 .returning(GitlabDelivery.body_sha256)
             )
-            is_new = inserted.scalar_one_or_none() is not None
-        return is_new
+            yield inserted.scalar_one_or_none() is not None

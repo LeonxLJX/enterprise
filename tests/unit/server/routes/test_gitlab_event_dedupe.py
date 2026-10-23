@@ -283,10 +283,13 @@ async def test_a_delivery_whose_process_died_mid_processing_is_processed_when_se
     assert len(manager.payloads) == 1
 
 
-async def test_record_is_true_only_for_the_first_of_concurrent_copies(manager):
-    store = GitlabDeliveryStore()
+async def claim_and_finish(body: bytes) -> bool:
+    async with GitlabDeliveryStore().claim(body) as is_new:
+        return is_new
 
-    results = await asyncio.gather(*(store.record(b'same body') for _ in range(5)))
+
+async def test_a_claim_is_new_only_for_the_first_of_concurrent_copies(manager):
+    results = await asyncio.gather(*(claim_and_finish(b'same body') for _ in range(5)))
 
     assert sorted(results) == [False, False, False, False, True]
 
@@ -294,23 +297,21 @@ async def test_record_is_true_only_for_the_first_of_concurrent_copies(manager):
 async def test_an_entry_past_retention_is_pruned_and_its_body_counts_as_new(
     manager, age_deliveries
 ):
-    store = GitlabDeliveryStore()
-    await store.record(b'old')
+    await claim_and_finish(b'old')
     await age_deliveries(RETENTION + timedelta(minutes=1))
 
-    assert await store.record(b'old')
-    assert not await store.record(b'old')
+    assert await claim_and_finish(b'old')
+    assert not await claim_and_finish(b'old')
 
 
-async def test_pruning_deletes_at_most_one_batch_per_record(
+async def test_pruning_deletes_at_most_one_batch_per_claim(
     manager, age_deliveries, async_session_maker
 ):
-    store = GitlabDeliveryStore()
     for n in range(PRUNE_BATCH + 5):
-        await store.record(f'old-{n}'.encode())
+        await claim_and_finish(f'old-{n}'.encode())
     await age_deliveries(RETENTION + timedelta(minutes=1))
 
-    await store.record(b'new')
+    await claim_and_finish(b'new')
 
     async with async_session_maker() as session:
         left = await session.scalar(select(func.count()).select_from(GitlabDelivery))
