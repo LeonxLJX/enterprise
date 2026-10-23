@@ -10,6 +10,7 @@ from openhands.app_server.integrations.service_types import (
     RateLimitError,
     Repository,
     RequestMethod,
+    ResourceNotFoundError,
 )
 from openhands.app_server.types import AppMode
 from openhands.app_server.utils.logger import openhands_logger as logger
@@ -583,28 +584,33 @@ class SaaSGitLabService(GitLabService):
             return None, WebhookStatus.INVALID
 
     async def user_has_write_access(self, project_id: str) -> bool:
+        """Whether the user has at least Developer access to the project.
+
+        False is a denial: GitLab reported a lower access level, or no project
+        the user can see (404). Any other failure to ask GitLab raises, so an
+        outage is not mistaken for a denial.
+        """
         url = f'{self.BASE_URL}/projects/{project_id}'
         try:
             response, _ = await self._make_request(url)
-            # Check if the current user is in the members list with access level >= 30 (Developer)
-
-            if 'permissions' not in response:
-                logger.info('permissions not found', extra={'response': response})
-                return False
-
-            permissions = response['permissions']
-            if permissions['project_access']:
-                logger.info('[GitLab]: Checking project access')
-                return permissions['project_access']['access_level'] >= 30
-
-            if permissions['group_access']:
-                logger.info('[GitLab]: Checking group access')
-                return permissions['group_access']['access_level'] >= 30
-
+        except ResourceNotFoundError:
+            logger.info('[GitLab]: Project not visible to user')
             return False
-        except Exception:
-            logger.warning('Access check failed', exc_info=True)
+
+        if 'permissions' not in response:
+            logger.info('permissions not found', extra={'response': response})
             return False
+
+        permissions = response['permissions']
+        if permissions['project_access']:
+            logger.info('[GitLab]: Checking project access')
+            return permissions['project_access']['access_level'] >= 30
+
+        if permissions['group_access']:
+            logger.info('[GitLab]: Checking group access')
+            return permissions['group_access']['access_level'] >= 30
+
+        return False
 
     async def reply_to_issue(
         self, project_id: str, issue_number: str, discussion_id: str | None, body: str

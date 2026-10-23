@@ -33,6 +33,7 @@ from openhands.app_server.types import (
     SessionExpiredError,
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
+from server.auth.org_access import OrgNotUsableError
 from server.auth.token_manager import TokenManager
 
 
@@ -173,7 +174,13 @@ class GitlabManager(Manager[GitlabViewType]):
 
         Args:
             gitlab_view: The GitLab view object containing issue/PR/comment info
+
+        An unexpected error raised before the conversation is requested is
+        re-raised after the user is told, so the event can be processed again.
+        Once it is requested, the conversation may exist even if the call
+        failed, so an error is only reported to the user.
         """
+        conversation_requested = False
         try:
             try:
                 user_info = gitlab_view.user_info
@@ -213,6 +220,7 @@ class GitlabManager(Manager[GitlabViewType]):
                     gitlab_view.user_info.keycloak_user_id, self.token_manager
                 )
 
+                conversation_requested = True
                 await gitlab_view.create_new_conversation(
                     self.jinja_env,
                     secret_store.provider_tokens,
@@ -254,8 +262,10 @@ class GitlabManager(Manager[GitlabViewType]):
 
             await self.send_message(msg_info, gitlab_view)
 
-        except Exception:
+        except Exception as e:
             logger.exception('[GitLab] Error starting job', stack_info=True)
             await self.send_message(
                 'Uh oh! There was an unexpected error starting the job :(', gitlab_view
             )
+            if not conversation_requested and not isinstance(e, OrgNotUsableError):
+                raise

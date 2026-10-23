@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -22,10 +22,12 @@ from starlette.requests import Request
 
 import integrations.gitlab.gitlab_manager as gitlab_manager_module
 import openhands.app_server.integrations.gitlab.gitlab_service as gitlab_service_module
+import server.auth.org_access as org_access_module
 import server.routes.integration.gitlab as route_module
 import storage.gitlab_delivery_store as delivery_store_module
 import storage.gitlab_webhook_store as webhook_store_module
 import storage.org_git_claim_store as org_git_claim_store_module
+import storage.org_store as org_store_module
 from integrations.gitlab.gitlab_manager import GitlabManager
 from integrations.gitlab.gitlab_service import SaaSGitLabService
 from integrations.gitlab.gitlab_view import GitlabIssueComment
@@ -38,6 +40,7 @@ from storage.gitlab_delivery_store import (
     GitlabDeliveryStore,
 )
 from storage.gitlab_webhook import GitlabWebhook
+from storage.org_git_claim import OrgGitClaim
 
 USER = 'user-1'
 UUID = 'uuid-1'
@@ -430,7 +433,9 @@ class RealManagerWorld:
 def world(async_session_maker, monkeypatch):
     monkeypatch.setattr(delivery_store_module, 'a_session_maker', async_session_maker)
     monkeypatch.setattr(webhook_store_module, 'a_session_maker', async_session_maker)
-    monkeypatch.setattr(org_git_claim_store_module, 'a_session_maker', async_session_maker)
+    monkeypatch.setattr(
+        org_git_claim_store_module, 'a_session_maker', async_session_maker
+    )
     world = RealManagerWorld()
     monkeypatch.setattr(
         gitlab_service_module, '_gitlab_service_impl', SaaSGitLabService
@@ -456,9 +461,7 @@ def world(async_session_maker, monkeypatch):
     monkeypatch.setattr(
         GitlabIssueComment, 'create_new_conversation', create_new_conversation
     )
-    monkeypatch.setattr(
-        route_module, 'gitlab_manager', GitlabManager(world.identity)
-    )
+    monkeypatch.setattr(route_module, 'gitlab_manager', GitlabManager(world.identity))
     return world
 
 
@@ -529,7 +532,38 @@ async def test_a_job_that_failed_before_starting_a_conversation_is_started_when_
     assert failed.status_code == 400
     assert retried.status_code == 200
     assert world.conversations.started == [5]
-    assert "I'm on it!" in world.gitlab.comments[-1]
+    assert world.gitlab.comments[0] == (
+        'Uh oh! There was an unexpected error starting the job :('
+    )
+    assert "I'm on it!" in world.gitlab.comments[1]
+
+
+async def test_a_job_refused_for_a_suspended_org_is_not_reconsidered(
+    world, hook_row, create_org, create_user, async_session_maker, monkeypatch
+):
+    monkeypatch.setattr(org_access_module, 'ENABLE_SUPER_ADMIN', True)
+    monkeypatch.setattr(org_store_module, 'a_session_maker', async_session_maker)
+    org = create_org(status='suspended')
+    async with async_session_maker() as session, session.begin():
+        session.add(
+            OrgGitClaim(
+                org_id=org.id,
+                provider='gitlab',
+                git_organization='group',
+                claimed_by=create_user().id,
+                claimed_at=datetime.now(UTC),
+            )
+        )
+
+    refused = await deliver(issue_comment())
+    copy = await deliver(issue_comment())
+
+    assert refused.status_code == 200
+    assert json.loads(copy.body)['message'] == 'Duplicate GitLab event ignored.'
+    assert world.conversations.started == []
+    assert world.gitlab.comments == [
+        'Uh oh! There was an unexpected error starting the job :('
+    ]
 
 
 async def test_a_job_whose_conversation_start_failed_is_not_started_again(
