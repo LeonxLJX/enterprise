@@ -343,9 +343,7 @@ async def test_entries_past_retention_stay_pruned_when_the_pruning_delivery_fail
     failed = await deliver(note_event())
 
     assert failed.status_code == 400
-    async with async_session_maker() as session:
-        left = await session.scalar(select(func.count()).select_from(GitlabDelivery))
-    assert left == 0
+    assert await count_deliveries(async_session_maker) == 0
 
 
 async def test_pruning_deletes_at_most_one_batch_per_claim(
