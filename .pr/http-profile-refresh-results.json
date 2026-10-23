@@ -1,14 +1,14 @@
 {
-  "sdk_version": "1.57.0",
+  "sdk_version": "1.58.0",
   "identity": "Local bearer identity fixture; real org permissions, PostgreSQL, router, resolver and builder. No deployed Keycloak or Cloud orchestration.",
   "cases": [
     {
       "name": "default",
       "preview_valid": true,
-      "id": "e77ec58a-e642-4dbc-a9a0-f49642f9bbc6",
+      "id": "195486aa-785c-4f90-bd66-580f6a72ec87",
       "status": 201,
       "wire_source": "agent_settings",
-      "profile_id": "5f18dda7-bc25-461a-af95-17b9d450ac0c",
+      "profile_id": "036e325b-abee-485a-9a90-3d034d4c040a",
       "revision": 0,
       "request_secret_names": [
         "ALLOWED_QA"
@@ -27,10 +27,10 @@
     {
       "name": "default-copy",
       "preview_valid": true,
-      "id": "21be1ca9-6583-48d9-838c-313905ec3952",
+      "id": "38a97b8c-b1e0-4f07-9efe-46c034512cf6",
       "status": 201,
       "wire_source": "agent_settings",
-      "profile_id": "6601fe4e-6265-4526-8417-1f0b1c6a560f",
+      "profile_id": "ab307b45-5ceb-4e27-a31d-f6d729c7afca",
       "revision": 0,
       "request_secret_names": [
         "ALLOWED_QA"
@@ -49,10 +49,10 @@
     {
       "name": "coding-no-browser",
       "preview_valid": true,
-      "id": "1b8f29fb-10b3-4757-8b88-a640f47ec013",
+      "id": "5d1bfdd5-ca84-4d95-a17f-506bc7d9dc91",
       "status": 201,
       "wire_source": "agent_settings",
-      "profile_id": "1ede4b1c-e812-4f8c-8900-241cfd997d72",
+      "profile_id": "f035e252-4571-4b96-aa8d-61900c06ed03",
       "revision": 0,
       "request_secret_names": [
         "ALLOWED_QA"
@@ -73,10 +73,10 @@
     {
       "name": "default-tools",
       "preview_valid": true,
-      "id": "b4766465-07de-443a-bc84-a5e35048280f",
+      "id": "77d59da9-43ea-4de0-9cd0-7a1ea9293ed1",
       "status": 201,
       "wire_source": "agent_settings",
-      "profile_id": "0ed2f14b-61d1-4454-8e4f-f889c7cd098b",
+      "profile_id": "dede3957-524d-43b4-8baf-37e770b77324",
       "revision": 0,
       "request_secret_names": [
         "ALLOWED_QA"
@@ -118,10 +118,10 @@
     },
     {
       "name": "acp_create_without_inference",
-      "id": "a7d7c710-91dc-4290-add9-f3a48f3e851c",
+      "id": "288a1ac6-432f-4c69-baa9-077e71aebb9b",
       "status": 201,
       "wire_source": "agent_settings",
-      "profile_id": "a90962f4-5caf-4748-8aa2-9658425ec183",
+      "profile_id": "818186b6-cbd5-4b7b-801d-b2c175c0522e",
       "revision": 0,
       "request_secret_names": [],
       "runtime_secret_names": [],

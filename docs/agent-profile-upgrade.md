@@ -1,6 +1,6 @@
 # Upgrade Enterprise Agent Profiles
 
-This release adopts the SDK 1.57.0 launch contract. The Enterprise Python SDK,
+This release adopts the SDK 1.58.0 launch contract. The Enterprise Python SDK,
 agent-server and tools packages, the lint environment, and the bundled sandbox
 image must use the same released version. External Helm/runtime-api image pins
 must be updated by their deployment owner as well.
@@ -65,7 +65,7 @@ of an old empty tool list and is not a data rollback.
 
 Ordinary OpenHands and ACP launches forward resolved settings; the sandbox SDK
 finalizes runtime fields. PLAN and request-level raw prompts retain the supported
-raw-agent transport because SDK 1.57.0 settings cannot represent those prompt
+raw-agent transport because SDK 1.58.0 settings cannot represent those prompt
 presets. The sandbox still finalizes that source. Profile tool selections and
 persona/context restrictions remain authoritative in both paths.
 

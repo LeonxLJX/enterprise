@@ -1,5 +1,32 @@
 # PR #763 refresh — October 23, 2026
 
+## Current published candidate: SDK 1.58
+
+Before publication, main advanced to `eadd43d1d59e349b2a8a95717cc4d348aacc55fd`.
+The two new commits (SDK 1.58 and auth-provider help text) were merged, retaining
+the profile implementation and migration 196. SDK, tools, agent-server, lint
+packages and the bundled sandbox image now use 1.58.0.
+
+Validation repeated against this candidate:
+
+- **8,295 backend tests passed; 75.85% coverage**, above CI's 72% threshold
+  (260.35 seconds, Python 3.12.13, locked dependencies, four workers).
+- All **nine HTTP/runtime cases pass on SDK 1.58**, including the real Azure
+  DeepSeek MCP call. See `http-profile-refresh-results.json`.
+- Frontend lint/typecheck and production build pass. The affected auth-provider
+  and agent-settings suites pass all **39 tests**. The earlier full frontend
+  run below remains the broad frontend baseline.
+- All Python pre-commit hooks, including mypy, pass.
+- Both PostgreSQL drivers again pass fresh upgrade, downgrade and re-upgrade
+  (six checks). Migration integrity and the locked dependency check pass.
+
+The user authorized publication of this refresh. Remote CI/review and deployed
+Replicated acceptance remain separate. The earlier validation below records the
+SDK 1.57 snapshot; its local-only publication hold has since been lifted.
+
+
+## Earlier SDK 1.57 validation
+
 Refreshed PR head `e7ae8404fb37f15e7680d147314a6fe475793aa8` against
 `main` at `2e1100eec565e22309ae8c6bd931a4594459b1f1`. This resolves the
 merge conflicts, keeps the current SDK/tool/server pins at 1.57.0 and moves the
@@ -24,7 +51,7 @@ Default-tool launches can still receive the configured launcher.
 
 ## Real HTTP and model validation
 
-`http-profile-refresh-results.json` records nine passing cases on the released
+`http-profile-refresh-sdk157-results.json` records nine passing cases on the released
 SDK/agent-server 1.57.0. The harness uses real PostgreSQL, organization permissions,
 the production profile router/resolver/conversation builder, and a separately
 running agent server over HTTP. A generated bearer identity replaces Keycloak.
