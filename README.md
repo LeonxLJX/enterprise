@@ -66,6 +66,8 @@ docker compose up -d
 
 Then open <http://localhost:3100/oauth/idp/signup> to create the admin account, and add an LLM under **Settings**. Agent Canvas is served at <http://localhost:3100/canvas/>. Data is kept in named volumes, so it survives `docker compose down`; run `docker compose down -v` to reset everything. If you change `APP_PORT` or access it through another hostname, set `WEB_HOST`, `WEB_URL` and `AGENT_CANVAS_LOCK_TO_CLOUD` to match (see the comments in `docker-compose.yml`).
 
+The `vector` service collects the logs of every service and every sandbox. It writes them to the `logs` volume as one JSON file per service per day, and keeps them for 7 days (set `LOG_RETENTION_DAYS` to change this). Common secret formats, such as API keys and bearer tokens, are redacted. To copy the logs to your machine, run `docker compose cp vector:/var/log/openhands ./logs`.
+
 To test your local changes, build `app` and `worker` from your checkout instead of pulling the release image:
 
 ```bash

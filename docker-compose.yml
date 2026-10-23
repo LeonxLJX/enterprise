@@ -31,9 +31,14 @@
 # existing session cookie instead of prompting to connect to OpenHands Cloud.
 #
 # Data persists across `docker compose down` and `up` in named volumes
-# (`db-data`, `app-filestore`, `automation-data`). `docker compose down -v`
+# (`db-data`, `app-filestore`, `automation-data`, `logs`). `docker compose down -v`
 # removes them and resets everything. The database keeps the credentials it was
 # first created with, so changing DB_USER/DB_PASS later requires a reset.
+#
+# The `vector` service collects the logs of every service and every sandbox in
+# this stack. It writes them to the `logs` volume as one file per service per
+# day, and keeps them for LOG_RETENTION_DAYS (default 7). To copy them to the
+# host, run `docker compose cp vector:/var/log/openhands ./logs`.
 #
 # By default this stack runs RELEASED images (pinned below) and builds nothing.
 # To use other versions, set these (shell or `.env`):
@@ -428,10 +433,48 @@ services:
       OH_WORKER_SCHEDULED_JOBS_APP_CONVERSATION_START_TASK_CLEAN: 'true'
     restart: unless-stopped
 
+  # Vector reads the logs of the other services and of the sandboxes through
+  # the Docker API, and writes them to the `logs` volume. The files outlive the
+  # containers, so the logs of a deleted sandbox or a recreated service are
+  # kept. Vector only collects lines that are written after it starts. No
+  # service depends on Vector, so the stack still runs if Vector fails.
+  # Vector skips its own logs by matching its hostname to its container ID, so
+  # do not set `hostname` here.
+  vector:
+    image: timberio/vector:0.60.0-alpine
+    init: true
+    # Vector does not delete old files. This loop deletes files older than
+    # LOG_RETENTION_DAYS once an hour.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          find /var/log/openhands -type f -mtime +$${LOG_RETENTION_DAYS} -delete
+          find /var/log/openhands -mindepth 1 -type d -empty -delete
+          sleep 3600
+        done &
+        exec vector --config /etc/vector/vector.yaml
+    environment:
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - logs:/var/log/openhands
+    configs:
+      - source: vector
+        target: /etc/vector/vector.yaml
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8686/health']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
 volumes:
   db-data:
   app-filestore:
   automation-data:
+  logs:
 
 configs:
   caddyfile:
@@ -441,6 +484,10 @@ configs:
         admin off
       }
       :80 {
+        # Caddy writes one JSON access log line per request. It hides the
+        # values of the Cookie and Authorization headers.
+        log
+
         # Server-to-server only: the automation service reaches it as
         # http://app:3000, so it never needs to be reachable from outside.
         @internal path /api/service /api/service/*
@@ -475,3 +522,107 @@ configs:
           reverse_proxy app:3000
         }
       }
+
+  # This config must not contain `$`. Compose reads `$$` as `$`, and Vector
+  # then reads `$` as the start of an environment variable.
+  vector:
+    content: |
+      api:
+        enabled: true
+        address: 127.0.0.1:8686
+
+      sources:
+        # This source reads the containers of this Compose project.
+        services:
+          type: docker_logs
+          include_labels:
+            - com.docker.compose.project=${COMPOSE_PROJECT_NAME}
+        # This source reads the sandbox containers that the app starts. They
+        # are not part of the Compose project.
+        sandboxes:
+          type: docker_logs
+          include_labels:
+            - openhands.managed=true
+
+      transforms:
+        normalize:
+          type: remap
+          inputs: [services, sandboxes]
+          source: |
+            # Redaction runs on the raw line before parsing, so JSON lines
+            # stay valid JSON.
+            line = redact(string!(.message), filters: [
+              r'\bsk-[A-Za-z0-9_-]{20,}',
+              r'\bgh[pousr]_[A-Za-z0-9]{20,}',
+              r'\bgithub_pat_[A-Za-z0-9_]{20,}',
+              r'\bglpat-[A-Za-z0-9_-]{20,}',
+              r'\bxox[abposr]-[A-Za-z0-9-]{10,}',
+              r'\bAKIA[0-9A-Z]{16}',
+              r'\bAIza[0-9A-Za-z_-]{35}',
+              r'\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+            ])
+            # These replacements keep the name of a bearer token, query
+            # parameter or URL user, and redact only its value.
+            line = replace_with(line, r'(?i)(?P<name>\bbearer\s+|\b[\w-]*(?:token|api_key|apikey|secret|password)=)[^\s&"]+') -> |m| {
+              string!(m.name) + "[REDACTED]"
+            }
+            line = replace_with(line, r'(?P<name>://[^/\s:@"]+:)[^/\s:@"]+@') -> |m| {
+              string!(m.name) + "[REDACTED]@"
+            }
+
+            out = {
+              "timestamp": .timestamp,
+              "service": string(.label."com.docker.compose.service") ?? "sandbox",
+              "container": .container_name,
+              "image": .image,
+              "stream": .stream,
+              "message": line
+            }
+
+            parsed, err = parse_json(line)
+            if err == null && is_object(parsed) {
+              log = object!(parsed)
+              out.message = string(log.message) ?? string(log.msg) ?? line
+              level, err = string(log.severity) ?? string(log.level)
+              if err == null {
+                out.level = upcase(level)
+              }
+              del(log.message)
+              del(log.msg)
+              del(log.severity)
+              del(log.level)
+              if !is_empty(log) {
+                out.log = log
+              }
+            } else {
+              # Postgres, uvicorn and Rich put the level near the start of
+              # plain-text lines.
+              prefix, err = parse_regex(line, r'^(?:\S+ \S+ \S+ \[\d+\] |\[[^\]]+\] )?(?P<level>DEBUG\d?|INFO|NOTICE|LOG|WARNING|ERROR|FATAL|PANIC|CRITICAL)\b')
+              if err == null {
+                out.level = prefix.level
+              }
+            }
+
+            # Docker health checks call these endpoints every 5 seconds. The
+            # successful calls are dropped.
+            if match(out.message, r'"GET /(?:alive|ready|health)\S* HTTP/[0-9.]+" 2\d\d') {
+              abort
+            }
+
+            # Each sandbox gets its own directory under sandboxes/.
+            if out.service == "sandbox" {
+              out.log_path = "sandboxes/" + (string(.container_name) ?? "unknown")
+            } else {
+              out.log_path = out.service
+            }
+            . = out
+
+      sinks:
+        files:
+          type: file
+          inputs: [normalize]
+          base_dir: /var/log/openhands
+          path: '{{ log_path }}/%Y-%m-%d.log'
+          encoding:
+            codec: json
+            except_fields: [log_path]
