@@ -2,9 +2,11 @@
 
 One GitLab event can reach the handler through more than one hook that
 authenticates, and GitLab queues each hook's deliveries separately, so the
-copies can arrive minutes apart. The handler records a sha256 of each
-delivery's raw body here before processing it and ignores a body it has
-already recorded. Rows are kept for 7 days.
+copies can arrive minutes apart. The handler claims a sha256 of each
+delivery's raw body here before processing it, marks it processed when done,
+and ignores a body that is processed or still being processed. A failed
+delivery's claim is deleted, and an unfinished claim can be taken again after
+a lease, so a resent delivery is processed. Rows are kept for at least 7 days.
 
 Revision ID: 199
 Revises: 198
@@ -32,6 +34,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text('now()'),
         ),
+        sa.Column('processed_at', sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index(
         'ix_gitlab_delivery_received_at', 'gitlab_delivery', ['received_at']

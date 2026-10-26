@@ -6,6 +6,7 @@ from integrations.store_repo_utils import store_repositories_in_db
 from integrations.types import GitLabResourceType
 from openhands.app_server.integrations.gitlab.gitlab_service import GitLabService
 from openhands.app_server.integrations.service_types import (
+    AuthenticationError,
     ProviderType,
     RateLimitError,
     Repository,
@@ -586,15 +587,19 @@ class SaaSGitLabService(GitLabService):
     async def user_has_write_access(self, project_id: str) -> bool:
         """Whether the user has at least Developer access to the project.
 
-        False is a denial: GitLab reported a lower access level, or no project
-        the user can see (404). Any other failure to ask GitLab raises, so an
-        outage is not mistaken for a denial.
+        False is a denial: GitLab reported a lower access level, no project the
+        user can see (404), or no usable token for the user (401), which a
+        retry cannot fix until the user signs in again. Any other failure to
+        ask GitLab raises, so an outage is not mistaken for a denial.
         """
         url = f'{self.BASE_URL}/projects/{project_id}'
         try:
             response, _ = await self._make_request(url)
         except ResourceNotFoundError:
             logger.info('[GitLab]: Project not visible to user')
+            return False
+        except AuthenticationError:
+            logger.info('[GitLab]: No usable GitLab token for user')
             return False
 
         if 'permissions' not in response:

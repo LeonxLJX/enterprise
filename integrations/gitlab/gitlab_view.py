@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 from jinja2 import Environment
@@ -56,6 +56,9 @@ class GitlabIssue(ResolverViewInterface):
     description: str
     previous_comments: list[Comment]
     is_mr: bool
+    # Set once the conversation start has been requested, after which the
+    # conversation may exist even if the request then failed.
+    conversation_start_requested: bool = field(default=False, init=False)
 
     def _get_branch_name(self) -> str | None:
         return getattr(self, 'branch_name', None)
@@ -168,6 +171,7 @@ class GitlabIssue(ResolverViewInterface):
         )
         setattr(injector_state, USER_CONTEXT_ATTR, gitlab_user_context)
 
+        self.conversation_start_requested = True
         async with get_app_conversation_service(
             injector_state
         ) as app_conversation_service:

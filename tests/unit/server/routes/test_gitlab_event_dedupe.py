@@ -2,25 +2,30 @@
 
 Signature checks run against real webhook rows. Most tests replace the GitLab
 manager the handler passes accepted events to, which would otherwise start
-conversations. The tests near the end run the real manager instead, faking
-only GitLab's REST API, the identity provider and the conversation start.
+conversations. The tests near the end run the real manager and GitLab view
+instead, faking only GitLab's REST API, the identity provider and the app
+conversation service.
 """
 
 import asyncio
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from keycloak.exceptions import KeycloakConnectionError
 from pydantic import SecretStr
 from sqlalchemy import func, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
 import integrations.gitlab.gitlab_manager as gitlab_manager_module
+import integrations.gitlab.gitlab_view as gitlab_view_module
 import openhands.app_server.integrations.gitlab.gitlab_service as gitlab_service_module
 import server.auth.org_access as org_access_module
 import server.routes.integration.gitlab as route_module
@@ -30,11 +35,14 @@ import storage.org_git_claim_store as org_git_claim_store_module
 import storage.org_store as org_store_module
 from integrations.gitlab.gitlab_manager import GitlabManager
 from integrations.gitlab.gitlab_service import SaaSGitLabService
-from integrations.gitlab.gitlab_view import GitlabIssueComment
+from openhands.app_server.app_conversation.app_conversation_models import (
+    AppConversationStartTaskStatus,
+)
 from openhands.app_server.integrations.service_types import RequestMethod
 from server.routes.integration.gitlab import gitlab_events
 from storage.gitlab_delivery import GitlabDelivery
 from storage.gitlab_delivery_store import (
+    LEASE,
     PRUNE_BATCH,
     RETENTION,
     GitlabDeliveryStore,
@@ -118,20 +126,6 @@ async def count_deliveries(async_session_maker) -> int:
         return await session.scalar(select(func.count()).select_from(GitlabDelivery))
 
 
-async def wait_for_a_delivery_blocked_on_another(async_session_maker):
-    """Wait until a connection to this test's database waits on another's lock."""
-    query = text(
-        'SELECT count(*) FROM pg_stat_activity'
-        " WHERE datname = current_database() AND wait_event_type = 'Lock'"
-    )
-    for _ in range(200):
-        async with async_session_maker() as session:
-            if await session.scalar(query):
-                return
-        await asyncio.sleep(0.025)
-    pytest.fail('no delivery waited for the one in progress')
-
-
 def deliver(body: bytes, token: str = SECRET):
     async def receive():
         return {'type': 'http.request', 'body': body, 'more_body': False}
@@ -207,41 +201,90 @@ async def test_a_delivery_whose_processing_failed_is_processed_when_sent_again(
     assert len(manager.payloads) == 1
 
 
-async def test_a_copy_arriving_while_the_first_fails_waits_and_is_then_processed(
-    manager, hook_row, async_session_maker
+async def test_a_copy_arriving_while_the_first_is_in_progress_is_dropped_at_once(
+    manager, hook_row
+):
+    manager.gate.clear()
+    first = asyncio.create_task(deliver(note_event()))
+    await manager.entered.wait()
+
+    async with asyncio.timeout(10):
+        copy = await deliver(note_event())
+    manager.gate.set()
+
+    assert json.loads(copy.body)['message'] == 'Duplicate GitLab event ignored.'
+    assert (await first).status_code == 200
+    assert len(manager.payloads) == 1
+
+
+async def test_a_delivery_that_failed_while_a_copy_was_dropped_is_processed_when_sent_again(
+    manager, hook_row
 ):
     manager.gate.clear()
     manager.failures = 1
     first = asyncio.create_task(deliver(note_event()))
     await manager.entered.wait()
-
-    copy = asyncio.create_task(deliver(note_event()))
-    await wait_for_a_delivery_blocked_on_another(async_session_maker)
-    assert not copy.done()
+    async with asyncio.timeout(10):
+        await deliver(note_event())
     manager.gate.set()
-
     assert (await first).status_code == 400
-    copy_message = json.loads((await copy).body)['message']
-    assert copy_message == 'GitLab events endpoint reached successfully.'
+
+    retried = await deliver(note_event())
+
+    assert retried.status_code == 200
     assert len(manager.payloads) == 1
 
 
-async def test_a_copy_arriving_while_the_first_succeeds_waits_and_is_dropped(
-    manager, hook_row, async_session_maker
+class NeedsAConnection:
+    """Processing that opens a database session of its own, as real processing does.
+
+    It holds every delivery until ``expected`` deliveries are processing at once.
+    """
+
+    def __init__(self, session_maker, expected: int):
+        self.session_maker = session_maker
+        self.expected = expected
+        self.processing = 0
+        self.all_processing = asyncio.Event()
+        self.processed = 0
+
+    async def receive_message(self, message):
+        self.processing += 1
+        if self.processing == self.expected:
+            self.all_processing.set()
+        await self.all_processing.wait()
+        async with self.session_maker() as session:
+            await session.execute(text('SELECT 1'))
+        self.processed += 1
+
+
+async def test_deliveries_in_progress_leave_database_connections_free(
+    hook_row, test_database, monkeypatch
 ):
-    manager.gate.clear()
-    first = asyncio.create_task(deliver(note_event()))
-    await manager.entered.wait()
+    in_progress = 2
+    engine = create_async_engine(
+        test_database.async_url,
+        pool_size=in_progress,
+        max_overflow=0,
+        pool_timeout=3,
+    )
+    session_maker = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(delivery_store_module, 'a_session_maker', session_maker)
+    monkeypatch.setattr(webhook_store_module, 'a_session_maker', session_maker)
+    processing = NeedsAConnection(session_maker, in_progress)
+    monkeypatch.setattr(route_module, 'gitlab_manager', processing)
+    try:
+        async with asyncio.timeout(30):
+            responses = await asyncio.gather(
+                *(deliver(note_event(note_id=n)) for n in range(in_progress))
+            )
+    finally:
+        await engine.dispose()
 
-    copy = asyncio.create_task(deliver(note_event()))
-    await wait_for_a_delivery_blocked_on_another(async_session_maker)
-    assert not copy.done()
-    manager.gate.set()
-
-    assert (await first).status_code == 200
-    copy_message = json.loads((await copy).body)['message']
-    assert copy_message == 'Duplicate GitLab event ignored.'
-    assert len(manager.payloads) == 1
+    assert [r.status_code for r in responses] == [200] * in_progress
+    assert processing.processed == in_progress
 
 
 async def test_a_delivery_cancelled_mid_processing_is_processed_when_sent_again(
@@ -285,8 +328,8 @@ asyncio.run(deliver(note_event()))
 """
 
 
-async def test_a_delivery_whose_process_died_mid_processing_is_processed_when_sent_again(
-    manager, hook_row, test_database
+async def test_a_delivery_whose_process_died_mid_processing_is_processed_after_the_lease(
+    manager, hook_row, test_database, age_deliveries
 ):
     db_url = test_database.async_url.render_as_string(hide_password=False)
     handler = await asyncio.create_subprocess_exec(
@@ -306,9 +349,14 @@ async def test_a_delivery_whose_process_died_mid_processing_is_processed_when_se
         handler.kill()
         await handler.wait()
 
-    retried = await deliver(note_event())
+    within_lease = await deliver(note_event())
+    await age_deliveries(LEASE + timedelta(minutes=1))
+    after_lease = await deliver(note_event())
 
-    assert retried.status_code == 200
+    assert json.loads(within_lease.body)['message'] == (
+        'Duplicate GitLab event ignored.'
+    )
+    assert after_lease.status_code == 200
     assert len(manager.payloads) == 1
 
 
@@ -321,6 +369,31 @@ async def test_a_claim_is_new_only_for_the_first_of_concurrent_copies(manager):
     results = await asyncio.gather(*(claim_and_finish(b'same body') for _ in range(5)))
 
     assert sorted(results) == [False, False, False, False, True]
+
+
+async def test_a_processed_delivery_is_still_a_duplicate_after_the_lease(
+    manager, age_deliveries
+):
+    await claim_and_finish(b'body')
+    await age_deliveries(LEASE + timedelta(minutes=1))
+
+    assert not await claim_and_finish(b'body')
+
+
+async def test_a_claim_that_fails_after_its_lease_was_taken_over_keeps_the_new_claim(
+    manager, age_deliveries
+):
+    store = GitlabDeliveryStore()
+    slow = store.claim(b'body')
+    assert await slow.__aenter__()
+    await age_deliveries(LEASE + timedelta(minutes=1))
+    takeover = store.claim(b'body')
+    assert await takeover.__aenter__()
+
+    await slow.__aexit__(RuntimeError, RuntimeError('slow copy failed'), None)
+
+    assert not await claim_and_finish(b'body')
+    await takeover.__aexit__(None, None, None)
 
 
 async def test_an_entry_past_retention_is_pruned_and_its_body_counts_as_new(
@@ -362,31 +435,39 @@ class FakeGitLabApi:
     """GitLab's REST API as the handler's GitLab service calls it.
 
     ``project_statuses`` queues the HTTP statuses of the next project lookups,
-    which is where the commenter's access level is read. ``comments`` holds
-    the comments it accepted.
+    which is where the commenter's access level is read, and ``issue_statuses``
+    those of the next issue lookups, which load the conversation's instructions.
+    ``comments`` holds the comments it accepted.
     """
 
     def __init__(self):
         self.access_level = 30
         self.project_statuses: list[int] = []
+        self.issue_statuses: list[int] = []
         self.comment_status = 201
         self.comments: list[str] = []
 
     async def execute_request(self, client, url, headers, params, method):
         request = httpx.Request(method.value.upper(), url)
+        if headers['Authorization'] == 'Bearer ':
+            return httpx.Response(401, json={'message': '401'}, request=request)
         if method == RequestMethod.POST:
             if self.comment_status == 201:
                 self.comments.append(params['body'])
             return httpx.Response(self.comment_status, json={}, request=request)
-        status = self.project_statuses.pop(0) if self.project_statuses else 200
+        path = request.url.path
+        if path.endswith('/notes'):
+            return httpx.Response(200, json=[], request=request)
+        if '/issues/' in path:
+            statuses, body = self.issue_statuses, {'title': 'Bug', 'description': ''}
+        else:
+            access = {'access_level': self.access_level, 'notification_level': 3}
+            statuses = self.project_statuses
+            body = {'permissions': {'project_access': access, 'group_access': None}}
+        status = statuses.pop(0) if statuses else 200
         if status != 200:
             return httpx.Response(status, json={'message': 'error'}, request=request)
-        access = {'access_level': self.access_level, 'notification_level': 3}
-        return httpx.Response(
-            200,
-            json={'permissions': {'project_access': access, 'group_access': None}},
-            request=request,
-        )
+        return httpx.Response(200, json=body, request=request)
 
 
 class FakeIdentityProvider:
@@ -406,18 +487,22 @@ class FakeIdentityProvider:
 
 
 class Conversations:
-    """Records the conversations the real manager starts."""
+    """The app conversation service; records the conversation start requests."""
 
     def __init__(self):
-        self.started: list[int] = []
+        self.started: list[str] = []
         self.failures = 0
 
-    async def create(self, view):
-        self.started.append(view.issue_number)
+    @asynccontextmanager
+    async def service(self, injector_state):
+        yield self
+
+    async def start_app_conversation(self, request):
+        self.started.append(request.title)
         if self.failures:
             self.failures -= 1
             raise RuntimeError('sandbox failed to start')
-        view.conversation_id = 'conversation-1'
+        yield SimpleNamespace(status=AppConversationStartTaskStatus.READY)
 
 
 class RealManagerWorld:
@@ -425,6 +510,7 @@ class RealManagerWorld:
         self.gitlab = FakeGitLabApi()
         self.identity = FakeIdentityProvider()
         self.conversations = Conversations()
+        self.gitlab_token: str | None = 'gitlab-token'
 
 
 @pytest.fixture
@@ -445,19 +531,18 @@ def world(async_session_maker, monkeypatch):
     )
 
     async def latest_token(service):
-        return SecretStr('gitlab-token')
+        return SecretStr(world.gitlab_token) if world.gitlab_token else None
 
     monkeypatch.setattr(SaaSGitLabService, 'get_latest_token', latest_token)
 
     async def user_auth(keycloak_user_id, token_manager):
         return object()
 
-    async def create_new_conversation(view, *args, **kwargs):
-        await world.conversations.create(view)
-
     monkeypatch.setattr(gitlab_manager_module, 'get_saas_user_auth', user_auth)
     monkeypatch.setattr(
-        GitlabIssueComment, 'create_new_conversation', create_new_conversation
+        gitlab_view_module,
+        'get_app_conversation_service',
+        world.conversations.service,
     )
     monkeypatch.setattr(route_module, 'gitlab_manager', GitlabManager(world.identity))
     return world
@@ -496,19 +581,20 @@ async def test_a_delivery_whose_access_check_could_not_reach_gitlab_is_processed
 
     assert failed.status_code == 400
     assert retried.status_code == 200
-    assert world.conversations.started == [5]
+    assert len(world.conversations.started) == 1
 
 
 @pytest.mark.parametrize(
     'project_lookup',
-    [{'access_level': 20}, {'status': 404}],
-    ids=['below-developer', 'project-not-visible'],
+    [{'access_level': 20}, {'status': 404}, {'status': 401}, {'token': None}],
+    ids=['below-developer', 'project-not-visible', 'token-rejected', 'no-token'],
 )
 async def test_a_commenter_without_write_access_is_ignored_and_not_reconsidered(
     world, hook_row, project_lookup
 ):
     world.gitlab.access_level = project_lookup.get('access_level', 30)
     world.gitlab.project_statuses = [project_lookup.get('status', 200)]
+    world.gitlab_token = project_lookup.get('token', world.gitlab_token)
 
     ignored = await deliver(issue_comment())
     copy = await deliver(issue_comment())
@@ -529,11 +615,24 @@ async def test_a_job_that_failed_before_starting_a_conversation_is_started_when_
 
     assert failed.status_code == 400
     assert retried.status_code == 200
-    assert world.conversations.started == [5]
+    assert len(world.conversations.started) == 1
     assert world.gitlab.comments[0] == (
         'Uh oh! There was an unexpected error starting the job :('
     )
     assert "I'm on it!" in world.gitlab.comments[1]
+
+
+async def test_a_job_whose_issue_could_not_be_read_is_started_when_sent_again(
+    world, hook_row
+):
+    world.gitlab.issue_statuses = [503]
+
+    failed = await deliver(issue_comment())
+    retried = await deliver(issue_comment())
+
+    assert failed.status_code == 400
+    assert retried.status_code == 200
+    assert len(world.conversations.started) == 1
 
 
 async def test_a_job_refused_for_a_suspended_org_is_not_reconsidered(
@@ -574,7 +673,7 @@ async def test_a_job_whose_conversation_start_failed_is_not_started_again(
 
     assert failed.status_code == 200
     assert json.loads(copy.body)['message'] == 'Duplicate GitLab event ignored.'
-    assert world.conversations.started == [5]
+    assert len(world.conversations.started) == 1
     assert world.gitlab.comments == [
         'Uh oh! There was an unexpected error starting the job :('
     ]
@@ -590,4 +689,4 @@ async def test_a_job_whose_acknowledgement_could_not_be_posted_is_not_started_ag
 
     assert first.status_code == 200
     assert json.loads(copy.body)['message'] == 'Duplicate GitLab event ignored.'
-    assert world.conversations.started == [5]
+    assert len(world.conversations.started) == 1

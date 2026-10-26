@@ -98,8 +98,8 @@ async def gitlab_events(
 
         # Keyed on the raw body: X-Gitlab-Event-UUID and Idempotency-Key differ
         # per hook, so they can't match copies of one event sent by two hooks.
-        # The claim is held until processing ends, so a delivery that fails is
-        # not recorded and a later copy of it is processed.
+        # A copy arriving while the claim is in progress is dropped. A failed
+        # delivery's claim is released, so resending it processes it.
         async with delivery_store.claim(body) as is_new:
             if not is_new:
                 logger.info('gitlab_is_duplicate')

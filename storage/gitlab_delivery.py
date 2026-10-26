@@ -7,7 +7,11 @@ from storage.base import Base
 
 
 class GitlabDelivery(Base):
-    """A GitLab webhook delivery the event handler has accepted, by body hash."""
+    """A GitLab webhook delivery the event handler has claimed, by body hash.
+
+    ``received_at`` is when the current claim was taken. ``processed_at`` stays
+    null until processing finishes.
+    """
 
     __tablename__ = 'gitlab_delivery'
     __table_args__ = (Index('ix_gitlab_delivery_received_at', 'received_at'),)
@@ -15,4 +19,7 @@ class GitlabDelivery(Base):
     body_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text('now()')
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
