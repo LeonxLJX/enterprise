@@ -71,6 +71,10 @@ export interface WebClientFeatureFlags {
    *  managed/OpenHands models, managed LLM key create/refresh) and show a
    *  "Please enable LiteLLM to use this feature" placeholder instead. */
   enable_litellm?: boolean;
+  /** When true, the org "Model Router" settings page is shown and the
+   *  server applies the org's active Model Router to conversation launches.
+   *  Mirrors the ENABLE_MODEL_ROUTER env var; off by default (OHE-3508). */
+  enable_model_router?: boolean;
 }
 
 export interface ACPModelOption {

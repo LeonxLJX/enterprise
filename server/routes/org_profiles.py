@@ -51,6 +51,7 @@ from server.verified_models.default_profile import (
 from storage.agent_profile_resolution import (
     OrgLLMProfileMutator,
     load_agent_profiles,
+    load_meta_profiles,
 )
 from storage.database import a_session_maker
 from storage.org import Org
@@ -371,9 +372,10 @@ async def delete_profile(
     """Delete an LLM profile.
 
     Blocked with 409 if any of the org's Agent Profiles still reference this LLM
-    profile by ``llm_profile_ref`` (the SDK ``find_referrers`` FK guard) — both
-    collections live on the same org row, so the ``SELECT ... FOR UPDATE`` lock
-    makes the referrer check and the delete atomic.
+    profile by ``llm_profile_ref`` (the SDK ``find_referrers`` FK guard), or if
+    a Model Router names it as classifier or class target — all collections
+    live on the same org row, so the ``SELECT ... FOR UPDATE`` lock makes the
+    referrer checks and the delete atomic.
     """
     async with _org_profiles_transaction(org_id, user_id) as (
         session,
@@ -385,6 +387,19 @@ async def delete_profile(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Profile '{name}' not found",
             )
+        # Same FK guard for the org's Model Routers (classifier / class
+        # targets name LLM profiles). Only while the feature is on: a hidden
+        # router must not block a visible action.
+        if constants.is_model_router_enabled():
+            router_referrers = load_meta_profiles(org).llm_profile_referrers(name)
+            if router_referrers:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"LLM profile '{name}' is still referenced by Model "
+                        f'Router(s): {", ".join(router_referrers)}'
+                    ),
+                )
         agent_profiles = load_agent_profiles(org)
         try:
             delete_llm_profile(agent_profiles, OrgLLMProfileMutator(profiles), name)
@@ -576,6 +591,20 @@ async def rename_profile(
         after = agent_profiles.model_dump(mode='json', context={'expose_secrets': True})
         if after != before:
             org.agent_profiles = after
+        # Model Routers name LLM profiles too (classifier / class targets);
+        # repoint them under the same lock so no router dangles after a rename.
+        routers = load_meta_profiles(org)
+        routers_changed = False
+        for config in routers.profiles.values():
+            if config.classifier_model == name:
+                config.classifier_model = request.new_name
+                routers_changed = True
+            for item in config.classes:
+                if item.model == name:
+                    item.model = request.new_name
+                    routers_changed = True
+        if routers_changed:
+            org.meta_profiles = routers.model_dump(mode='json')
         await session.execute(
             update(OrgMember)
             .where(

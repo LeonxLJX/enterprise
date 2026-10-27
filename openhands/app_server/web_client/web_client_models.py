@@ -71,6 +71,13 @@ class WebClientFeatureFlags(BaseModel):
     # create/refresh) and show a "Please enable LiteLLM to use this
     # feature" placeholder instead. Set from the ENABLE_LEGACY_LITELLM env var.
     enable_litellm: bool = True
+    # Org Model Router (OHE-3508): when true, the settings shell shows the
+    # org "Model Router" page and the server serves
+    # /api/organizations/{org_id}/meta-profiles and applies the active router
+    # to conversation launches. Set from ENABLE_MODEL_ROUTER (or the
+    # OH_WEB_CLIENT_FEATURE_FLAGS_* form, which the server reads too). Default
+    # False so existing installs keep today's behavior.
+    enable_model_router: bool = False
 
     # This can be removed / replaced when a DeploymentMode (or similar) env var is created.
     @model_validator(mode='after')
