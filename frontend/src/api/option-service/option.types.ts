@@ -75,6 +75,15 @@ export interface WebClientFeatureFlags {
    *  server applies the org's active Model Router to conversation launches.
    *  Mirrors the ENABLE_MODEL_ROUTER env var; off by default (OHE-3508). */
   enable_model_router?: boolean;
+  /** When true, Personal Settings shows the dedicated Agent Context page
+   *  (``/settings/agent-context``). Off by default until bug bash. */
+  enable_agent_context_page?: boolean;
+  /** When true, the personal ``Agent`` page is replaced by Agent Profiles
+   *  (``/settings/agents``). Off by default until bug bash. */
+  enable_agent_profiles_page?: boolean;
+  /** When true, org admins can add, edit and delete the organization's
+   *  shared Agent Profiles on the Agent Profiles page. Off by default. */
+  enable_org_agent_profiles?: boolean;
 }
 
 export interface ACPModelOption {

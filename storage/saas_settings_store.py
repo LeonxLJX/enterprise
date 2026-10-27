@@ -58,6 +58,7 @@ from storage.agent_profile_resolution import (
     load_agent_profiles,
     load_llm_profiles,
     load_meta_profiles,
+    locate_agent_profile,
 )
 from storage.database import a_session_maker
 from storage.lite_llm_manager import (
@@ -295,7 +296,8 @@ class SaasSettingsStore(SettingsStore):
         non-persisted launch override — never written back to
         ``org_member.active_agent_profile_id``), else the member's ambient
         ``active_agent_profile_id``, else the org-wide default pointer
-        (``AgentProfiles.active``, if one has been set). Returns
+        (``AgentProfiles.active``, if one has been set). The id is looked up
+        in the member's personal collection first, then the org's. Returns
         ``(agent_settings_dump, profile_id, revision)``, or ``None`` to fall
         back to the composed ``agent_settings``.
         Delegates the ``llm_profile_ref`` + ``mcp_server_refs`` join entirely to
@@ -317,8 +319,8 @@ class SaasSettingsStore(SettingsStore):
         if not active_id:
             return None
 
-        name = agent_profiles.name_for_id(active_id)
-        if name is None:
+        located = locate_agent_profile(org, org_member, active_id)
+        if located is None:
             logger.warning(
                 'Active agent profile %s not found for user %s in org %s; '
                 'falling back to composed settings',
@@ -327,10 +329,8 @@ class SaasSettingsStore(SettingsStore):
                 org.id,
             )
             return None
-        try:
-            profile = agent_profiles.load(name)
-        except FileNotFoundError:
-            return None
+        profile, _scope = located
+        name = profile.name
 
         mcp_config: dict[str, MCPServer] = {}
         mcp_raw = merged_agent_settings.get('mcp_config')
@@ -763,6 +763,15 @@ class SaasSettingsStore(SettingsStore):
                 kwargs['agent_settings'] = resolved_dump
                 kwargs['active_agent_profile_id'] = resolved_id
                 kwargs['active_agent_profile_revision'] = resolved_revision
+                # Scope and secret allow-list of the launched profile, read by
+                # conversation-start's secrets setup: an org-scoped profile
+                # with an explicit list resolves it against the org-shared
+                # secrets only (OHE-3088).
+                located = locate_agent_profile(org, org_member, resolved_id)
+                if located is not None:
+                    launched, launched_scope = located
+                    kwargs['active_agent_profile_scope'] = launched_scope
+                    kwargs['active_agent_profile_secret_refs'] = launched.secret_refs
             # The org's active Model Router applies to every launch, whether it
             # runs the composed settings or a resolved Agent Profile.
             self._apply_org_model_router(

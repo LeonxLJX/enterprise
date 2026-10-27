@@ -4,7 +4,8 @@ The thin glue (#15044) that lets the SDK profile substrate
 (``resolve_agent_profile`` / ``find_referrers`` / ``cascade_rename``) operate
 over the SaaS storage model. Everything domain-level is imported from
 ``openhands.sdk.profiles``; this module only adapts the ``org.agent_profiles`` /
-``org.llm_profiles`` columns to the SDK's store/loader/mutator Protocols.
+``org_member.agent_profiles`` / ``org.llm_profiles`` columns to the SDK's
+store/loader/mutator Protocols.
 
 Used by the ``/api/agent-profiles`` router, the LLM-profile FK guard in
 ``org_profiles``, and ``SaasSettingsStore.load``.
@@ -12,7 +13,7 @@ Used by the ``/api/agent-profiles`` router, the LLM-profile FK guard in
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
 
@@ -26,6 +27,7 @@ from storage.mcp_config import coerce_persisted_mcp_config
 
 if TYPE_CHECKING:
     from openhands.sdk.llm import LLM
+    from openhands.sdk.profiles import AgentProfile
     from openhands.sdk.utils.cipher import Cipher
     from storage.org import Org
     from storage.org_member import OrgMember
@@ -44,6 +46,46 @@ def load_agent_profiles(org: Org) -> AgentProfiles:
     except ValidationError as exc:
         logger.warning('Failed to load org agent profiles for %s: %s', org.id, exc)
         return AgentProfiles()
+
+
+AgentProfileScope = Literal['personal', 'org']
+
+
+def load_member_agent_profiles(member: OrgMember) -> AgentProfiles:
+    """Load the member's personal ``AgentProfiles``, defaulting to empty if unset.
+
+    Same degrade-on-drift contract as :func:`load_agent_profiles`.
+    """
+    if member.agent_profiles is None:
+        return AgentProfiles()
+    try:
+        return AgentProfiles.model_validate(member.agent_profiles)
+    except ValidationError as exc:
+        logger.warning(
+            'Failed to load personal agent profiles for member %s in org %s: %s',
+            member.user_id,
+            member.org_id,
+            exc,
+        )
+        return AgentProfiles()
+
+
+def locate_agent_profile(
+    org: Org, member: OrgMember, profile_id: str
+) -> tuple[AgentProfile, AgentProfileScope] | None:
+    """Find ``profile_id`` in the member's collection, then the org's.
+
+    Ids are UUIDs minted per save, so the order is only a tiebreak; it lets a
+    member pointer or a launch override reference either scope. Returns the
+    profile together with the scope it was found in, or ``None``.
+    """
+    personal = load_member_agent_profiles(member).profiles.get(profile_id)
+    if personal is not None:
+        return personal, 'personal'
+    shared = load_agent_profiles(org).profiles.get(profile_id)
+    if shared is not None:
+        return shared, 'org'
+    return None
 
 
 def load_llm_profiles(org: Org) -> LLMProfiles:

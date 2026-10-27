@@ -78,6 +78,22 @@ class WebClientFeatureFlags(BaseModel):
     # OH_WEB_CLIENT_FEATURE_FLAGS_* form, which the server reads too). Default
     # False so existing installs keep today's behavior.
     enable_model_router: bool = False
+    # OHE-3456 settings pages, hidden until bug bash is complete. Each gates
+    # one Personal Settings entry: ``enable_agent_context_page`` shows the
+    # dedicated Agent Context page (``/settings/agent-context``) and
+    # ``enable_agent_profiles_page`` replaces ``Agent`` with Agent Profiles
+    # (``/settings/agents``) and, because that Agent page hosted the memory
+    # toggle, also shows the Agent Context page. Set from ENABLE_AGENT_CONTEXT_PAGE and
+    # ENABLE_AGENT_PROFILES_PAGE (or the OH_WEB_CLIENT_FEATURE_FLAGS_* form).
+    # Default False so every existing install keeps today's settings UI.
+    # UI-level only -- the agent-profiles API is not gated.
+    enable_agent_context_page: bool = False
+    enable_agent_profiles_page: bool = False
+    # ``enable_org_agent_profiles`` lets org admins add, edit and delete the
+    # organization's shared Agent Profiles on that page (OHE-3088). Set from
+    # ENABLE_ORG_AGENT_PROFILES. UI-level only -- the ``scope=org`` API and
+    # its org-scope constraints are not gated.
+    enable_org_agent_profiles: bool = False
 
     # This can be removed / replaced when a DeploymentMode (or similar) env var is created.
     @model_validator(mode='after')
