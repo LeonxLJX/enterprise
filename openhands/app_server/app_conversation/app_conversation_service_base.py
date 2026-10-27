@@ -929,8 +929,12 @@ class AppConversationServiceBase(AppConversationService, ABC):
         """
         setup_script = project_dir + '/.openhands/setup.sh'
 
+        # .openhands/setup.sh is optional — many repos don't ship one. Only
+        # chmod +x and source it when present, so a missing script doesn't
+        # litter the bash-event log with exit-1 noise at conversation start.
+        # See #18953.
         await workspace.execute_command(
-            f'chmod +x {setup_script} && source {setup_script}',
+            f'test -f {setup_script} && chmod +x {setup_script} && source {setup_script}',
             cwd=project_dir,
             timeout=600,
         )
@@ -946,10 +950,22 @@ class AppConversationServiceBase(AppConversationService, ABC):
             workspace: Remote workspace for command execution.
             project_dir: Project root directory (repo root when a repo is selected).
         """
-        command = 'mkdir -p .git/hooks && chmod +x .openhands/pre-commit.sh'
+        # .openhands/pre-commit.sh is optional — only install hooks when the
+        # repo actually ships one. Without the existence guard, a missing
+        # script produced exit-1 in every workspace that doesn't provide one,
+        # and the downstream hook-install branch (which assumes chmod succeeded)
+        # was skipped with no useful outcome. See #18953.
+        pre_commit_path = '.openhands/pre-commit.sh'
+        command = (
+            f'test -f {pre_commit_path} && '
+            f'mkdir -p .git/hooks && chmod +x {pre_commit_path}'
+        )
         pre_commit_command_result = await workspace.execute_command(
             command, project_dir
         )
+        # If the file wasn't present, test -f fails and we exit cleanly — no
+        # hook installed, no error noise. If the file was present but chmod
+        # still failed, something else is wrong and we should bail out.
         if pre_commit_command_result.exit_code:
             return
 
